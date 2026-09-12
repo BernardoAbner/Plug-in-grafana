@@ -1,0 +1,7 @@
+apiVersion: 1
+
+providers:
+  - name: 'vale-stat-card'
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards
