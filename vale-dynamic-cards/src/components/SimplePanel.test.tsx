@@ -70,3 +70,30 @@ test('missing source is explicit even while other data is available', () => {
   expect(screen.getByText('Campo indisponível')).toBeInTheDocument();
   expect(screen.queryByText('20')).not.toBeInTheDocument();
 });
+
+test('status bar resolves the dashboard hostname and shows both health indicators', () => {
+  const source = listMetrics([data])[0].source;
+  render(
+    <SimplePanel
+      {...props}
+      replaceVariables={(value) => value.replace('${hostname}', 'srv-interserver')}
+      options={{
+        ...options,
+        displayMode: 'statusBar',
+        headerTitle: '${hostname}',
+        headerDetailSource: source,
+        statusBadges: [
+          { id: 'ping', source, label: 'PING' },
+          { id: 'agent', source, label: 'AGENTE' },
+        ],
+        metricMode: 'configured',
+        metrics: [{ id: 'cpu', source, label: 'Processador' }],
+      }}
+    />
+  );
+
+  expect(screen.getByText('srv-interserver')).toBeInTheDocument();
+  expect(screen.getByText('PING: 20')).toBeInTheDocument();
+  expect(screen.getByText('AGENTE: 20')).toBeInTheDocument();
+  expect(screen.getByText('Processador')).toBeInTheDocument();
+});

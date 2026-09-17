@@ -51,7 +51,7 @@
         }
       ],
       "title": "Sample Panel Title",
-      "type": "vale-valestatcard-panel"
+      "type": "vale-dynamic-cards-panel"
     },
     {
       "datasource": {
@@ -82,7 +82,7 @@
         }
       ],
       "title": "Sample Panel Title",
-      "type": "vale-valestatcard-panel"
+      "type": "vale-dynamic-cards-panel"
     }
   ],
   "refresh": "",

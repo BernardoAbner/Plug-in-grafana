@@ -18,7 +18,7 @@ export function listMetrics(frames: DataFrame[]): AvailableMetric[] {
     return frame.fields.flatMap((field) => {
       const fieldOccurrence = fieldCounts.get(field.name) ?? 0;
       fieldCounts.set(field.name, fieldOccurrence + 1);
-      if (![FieldType.number, FieldType.string].includes(field.type)) {
+      if (field.type === FieldType.time) {
         return [];
       }
       return [

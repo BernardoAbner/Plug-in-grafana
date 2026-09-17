@@ -159,10 +159,39 @@ export interface CustomFieldConfig {
   valueMappings: AnyMapping[];
   // Ícone por campo
   icon?: CardIcon;
+  showIcon?: boolean;
+  useThreshold?: boolean;
+  colorMode?: 'text' | 'background';
 }
 
 /** Opções de painel — aparecem na seção "Panel options" da sidebar */
 export interface SimpleOptions {
+  displayMode?: 'cards' | 'statusBar';
+  headerTitle?: string;
+  headerDetailSource?: MetricSource;
+
+  indicator1Source?: MetricSource;
+  indicator1Label?: string;
+  indicator2Source?: MetricSource;
+  indicator2Label?: string;
+
+  statusBarMetric1Source?: MetricSource;
+  statusBarMetric1Label?: string;
+  statusBarMetric2Source?: MetricSource;
+  statusBarMetric2Label?: string;
+  statusBarMetric3Source?: MetricSource;
+  statusBarMetric3Label?: string;
+  statusBarMetric4Source?: MetricSource;
+  statusBarMetric4Label?: string;
+  statusBarMetric5Source?: MetricSource;
+  statusBarMetric5Label?: string;
+
+  statusBadges?: StatusBadgeConfig[];
+  /** Legacy status settings kept so existing dashboards continue to render. */
+  statusSource?: MetricSource;
+  statusLabel?: string;
+  agentSource?: MetricSource;
+  agentLabel?: string;
   metricMode?: 'auto' | 'configured';
   metrics?: MetricConfig[];
   cardLayout?: 'separate' | 'grouped';
@@ -174,9 +203,7 @@ export interface SimpleOptions {
   minCardWidth?: number;
   layoutOrientation: 'horizontal' | 'vertical';
   theme: CardTheme;
-  colorMode: 'text' | 'background';
   valueFontSize: number;
-  useThreshold: boolean;
 
   // Ícone padrão do painel (pode ser sobrescrito pelo custom config)
   icon: CardIcon;
@@ -212,4 +239,10 @@ export interface MetricConfig {
   verticalAlign?: VerticalAlign;
   badgeMode?: 'none' | 'text' | 'value';
   badgeText?: string;
+}
+
+export interface StatusBadgeConfig {
+  id: string;
+  source?: MetricSource;
+  label?: string;
 }

@@ -3,14 +3,14 @@
 # Uso:
 #   .\deploy.ps1 -VmUser bernardo -VmHost 192.168.86.136
 #
-# Rode esse script de dentro da pasta do projeto (vale-valestatcard-panel).
+# Rode este script de dentro da pasta do projeto (vale-dynamic-cards).
 
 param(
     [string]$VmUser = "bernardo",
     [string]$VmHost = "192.168.86.136"
 )
 
-$PluginId = "vale-valestatcard-panel"
+$PluginId = "vale-dynamic-cards-panel"
 $RemoteTmp = "/tmp/$PluginId"
 $RemoteDest = "/var/lib/grafana/plugins/$PluginId"
 
