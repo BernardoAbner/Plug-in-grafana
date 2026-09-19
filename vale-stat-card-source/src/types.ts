@@ -28,8 +28,7 @@ export type CardIcon =
 
 export type CardTheme = 'vale' | 'teal' | 'blue' | 'purple' | 'orange' | 'red' | 'green';
 
-export type ValueAlignment = 'left' | 'center' | 'right';
-export type ChartType = 'line' | 'area' | 'bar';
+export type ChartType = 'line' | 'area' | 'bar' | 'points';
 export type ThresholdMode = 'line' | 'schema';
 export type LineInterpolation = 'straight' | 'smooth' | 'stepBefore' | 'stepAfter';
 export type LinePattern = 'solid' | 'dashed';
@@ -168,13 +167,7 @@ export interface SpecialMapping {
 
 export type AnyMapping = ValueMapping | RangeMapping | RegexMapping | SpecialMapping;
 
-/** Configuração por campo — aparece na seção "Field" (defaults + overrides) do Grafana */
 export interface CustomFieldConfig {
-  // Formatação de valor
-  unit: NativeUnit;
-  customUnit?: string;
-  customDecimals?: number;
-  decimals: number;               // -1 = automático
   // Thresholds nativos
   nativeThresholds: NativeThresholdsConfig;
   // Mapeamentos de valor (sistema completo)
@@ -183,21 +176,19 @@ export interface CustomFieldConfig {
   chartType: ChartType;
   lineColor: string;
   areaOpacity: number;            // 0–100, convertido para 0–1 na renderização
-  showGrid: boolean;
   showYAxis: boolean;
-  showXAxis: boolean;
-  thresholdMode: ThresholdMode;
   lineInterpolation: LineInterpolation;
   linePattern: LinePattern;
   lineGradient: LineGradient;
   lineWidth: number;
   showPoints: boolean;
   pointSize: number;
+  showGrid: boolean;
+  showXAxis: boolean;
   barWidth: number;
   barMode: BarMode;
   showThresholdBands: boolean;
   showTimeInAlert: boolean;
-  axisConfig: AxisConfig;
 }
 
 /** Opções de painel — aparecem na seção "Panel options" da sidebar */
@@ -209,6 +200,7 @@ export interface SimpleOptions {
   showLegend: boolean;
   valueFontSize: number;
   useThreshold: boolean;
+  thresholdMode: ThresholdMode;
   // Toggles de visibilidade do cabeçalho
   showIcon: boolean;
   showLabel: boolean;

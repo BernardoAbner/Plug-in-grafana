@@ -1,6 +1,6 @@
 {
   "name": "vale-time-series",
-  "version": "1.0.1789240516",
+  "version": "1.0.1789850952",
   "scripts": {
     "build": "webpack -c ./.config/webpack/webpack.config.ts --env production",
     "dev": "webpack -w -c ./.config/webpack/webpack.config.ts --env development",
@@ -74,7 +74,8 @@
     "@grafana/schema": "13.1.0",
     "@grafana/ui": "13.1.0",
     "react": "^18.3.0",
-    "react-dom": "^18.3.0"
+    "react-dom": "^18.3.0",
+    "uplot": "^1.6.32"
   },
   "packageManager": "npm@10.9.7"
 }

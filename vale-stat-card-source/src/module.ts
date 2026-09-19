@@ -1,45 +1,39 @@
-import { FieldConfigProperty, PanelPlugin } from '@grafana/data';
+import { PanelPlugin, FieldConfigProperty } from '@grafana/data';
 import { SimpleOptions, CustomFieldConfig } from './types';
 import { SimplePanel } from './components/SimplePanel';
 
 export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePanel)
   .setNoPadding()
   .useFieldConfig({
-    // O painel fornece equivalentes próprios para estas opções.
-    disableStandardOptions: [
-      FieldConfigProperty.Min,
-      FieldConfigProperty.Max,
-      FieldConfigProperty.FieldMinMax,
-      FieldConfigProperty.DisplayName,
-      FieldConfigProperty.NoValue,
-      FieldConfigProperty.Links,
-      FieldConfigProperty.Actions,
-      FieldConfigProperty.Color,
-      FieldConfigProperty.Unit,
-      FieldConfigProperty.Decimals,
-    ],
+    standardOptions: {
+      [FieldConfigProperty.Unit]: {},
+      [FieldConfigProperty.Decimals]: {},
+      [FieldConfigProperty.Min]: {},
+      [FieldConfigProperty.Max]: {},
+      [FieldConfigProperty.Thresholds]: {},
+    },
     useCustomConfig: (builder) => {
       builder
-        // --- Valor / Formatação ---
-
-        .addUnitPicker({
-          path: 'customUnit',
-          name: 'Unidade',
-          description: 'Substitui a unidade original. Escolha "none" para usar o padrão.',
-          defaultValue: '',
+        // --- Tipo e estilo do grafico ---
+        .addSelect({
+          path: 'chartType',
+          name: 'Tipo de grafico',
+          description: 'Estilo de desenho da serie',
+          defaultValue: 'area',
           category: ['Grafico'],
-        })
-        .addNumberInput({
-          path: 'customDecimals',
-          name: 'Decimais',
-          description: 'Define as casas decimais. Deixe em branco para automático.',
-          defaultValue: 2,
-          category: ['Grafico'],
+          settings: {
+            options: [
+              { value: 'line', label: 'Linha' },
+              { value: 'area', label: 'Area'  },
+              { value: 'bar', label: 'Barra'  },
+              { value: 'points', label: 'Pontos'  },
+            ],
+          },
         })
         .addSelect({
           path: 'lineInterpolation',
           name: 'Traçado da linha',
-          defaultValue: 'straight',
+          defaultValue: 'smooth',
           category: ['Grafico'],
           settings: {
             options: [
@@ -57,25 +51,20 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
           category: ['Grafico'],
           settings: { options: [{ value: 'solid', label: 'Sólida' }, { value: 'dashed', label: 'Tracejada' }] },
         })
-        .addSelect({
-          path: 'lineGradient',
-          name: 'Gradiente da linha',
-          defaultValue: 'none',
-          category: ['Grafico'],
-          settings: { 
-            options: [
-              { value: 'none', label: 'Nenhum' }, 
-              { value: 'opacity', label: 'Desbotar (Vertical)' }, 
-              { value: 'fade', label: 'Desbotar (Horizontal)' }
-            ] 
-          },
-        })
         .addNumberInput({
           path: 'lineWidth',
           name: 'Espessura da linha',
           defaultValue: 2,
           category: ['Grafico'],
           settings: { min: 1, max: 10, step: 1 },
+        })
+        .addNumberInput({
+          path: 'areaOpacity',
+          name: 'Opacidade da area (%)',
+          description: '0 = transparente, 100 = opaco',
+          defaultValue: 35,
+          category: ['Grafico'],
+          settings: { min: 0, max: 100, step: 5 },
         })
         .addBooleanSwitch({
           path: 'showPoints',
@@ -86,82 +75,15 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
         .addNumberInput({
           path: 'pointSize',
           name: 'Tamanho dos pontos',
-          defaultValue: 3,
+          defaultValue: 5,
           category: ['Grafico'],
           settings: { min: 1, max: 10, step: 1 },
           showIf: (cfg) => cfg.showPoints === true,
         })
-        .addNumberInput({
-          path: 'barWidth',
-          name: 'Largura das barras (%)',
-          defaultValue: 70,
-          category: ['Grafico'],
-          settings: { min: 10, max: 100, step: 5 },
-          showIf: (cfg) => cfg.chartType === 'bar',
-        })
-        .addSelect({
-          path: 'barMode',
-          name: 'Modo das barras',
-          defaultValue: 'grouped',
-          category: ['Grafico'],
-          settings: { options: [{ value: 'grouped', label: 'Lado a lado' }, { value: 'stacked', label: 'Empilhadas' }] },
-          showIf: (cfg) => cfg.chartType === 'bar',
-        })
-
-        .addBooleanSwitch({
-          path: 'showTimeInAlert',
-          name: 'Mostrar tempo em alerta',
-          description: 'Mostra a duração em cada faixa de threshold dentro do período do Grafana.',
-          defaultValue: false,
-          category: ['Resumo do período'],
-          showIf: (cfg) => {
-            const thresholds = (cfg as any).thresholds ?? cfg.nativeThresholds;
-            return thresholds?.steps?.some((step: any) => step.value !== null) ?? false;
-          },
-        })
-
-
-        // --- Tipo e estilo do grafico ---
-        .addSelect({
-          path: 'chartType',
-          name: 'Tipo de grafico',
-          description: 'Estilo de desenho da serie',
-          defaultValue: 'area',
-          category: ['Grafico'],
-          settings: {
-            options: [
-              { value: 'line', label: 'Linha' },
-              { value: 'area', label: 'Area'  },
-            ],
-          },
-        })
-        .addColorPicker({
-          path: 'lineColor',
-          name: 'Cor da linha',
-          description: 'Cor da linha/area/barra (deixe em branco para usar a cor do threshold ou tema)',
-          defaultValue: '',
-          category: ['Grafico'],
-        })
-        .addNumberInput({
-          path: 'areaOpacity',
-          name: 'Opacidade da area (%)',
-          description: '0 = transparente, 100 = opaco',
-          defaultValue: 35,
-          category: ['Grafico'],
-          settings: { min: 0, max: 100, step: 5 },
-        })
-
-
         // --- Eixos ---
         .addBooleanSwitch({
           path: 'showGrid',
           name: 'Mostrar grade',
-          defaultValue: false,
-          category: ['Eixos'],
-        })
-        .addBooleanSwitch({
-          path: 'showYAxis',
-          name: 'Mostrar eixo Y',
           defaultValue: false,
           category: ['Eixos'],
         })
@@ -172,34 +94,22 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
           category: ['Eixos'],
         })
         .addBooleanSwitch({
-          path: 'axisConfig.autoMin',
-          name: 'Eixo Y - Minimo automatico',
-          description: 'Quando ativado, usa o menor valor dos dados com padding automatico',
-          defaultValue: true,
+          path: 'showYAxis',
+          name: 'Mostrar eixo Y',
+          defaultValue: false,
           category: ['Eixos'],
         })
-        .addNumberInput({
-          path: 'axisConfig.min',
-          name: 'Eixo Y - Minimo manual',
-          defaultValue: 0,
-          category: ['Eixos'],
-          settings: { step: 1 },
-          showIf: (cfg) => !(cfg.axisConfig?.autoMin ?? true),
-        })
+        // --- Resumo do período ---
         .addBooleanSwitch({
-          path: 'axisConfig.autoMax',
-          name: 'Eixo Y - Maximo automatico',
-          description: 'Quando ativado, usa o maior valor dos dados com padding automatico',
-          defaultValue: true,
-          category: ['Eixos'],
-        })
-        .addNumberInput({
-          path: 'axisConfig.max',
-          name: 'Eixo Y - Maximo manual',
-          defaultValue: 100,
-          category: ['Eixos'],
-          settings: { step: 1 },
-          showIf: (cfg) => !(cfg.axisConfig?.autoMax ?? true),
+          path: 'showTimeInAlert',
+          name: 'Mostrar tempo em alerta',
+          description: 'Mostra a duração em cada faixa de threshold dentro do período do Grafana.',
+          defaultValue: false,
+          category: ['Resumo do período'],
+          showIf: (cfg) => {
+            const thresholds = (cfg as any).thresholds ?? cfg.nativeThresholds;
+            return thresholds?.steps?.some((step: any) => step.value !== null) ?? false;
+          },
         });
     },
   })
@@ -306,7 +216,20 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
         description: 'A cor do valor grande segue a cor do threshold ativo.',
         defaultValue: false,
         category: ['Aparencia'],
-        showIf: (o) => o.useThreshold,
+        showIf: (o) => o.useThreshold === true,
+      })
+      .addRadio({
+        path: 'thresholdMode',
+        name: 'Modo de threshold',
+        defaultValue: 'line',
+        category: ['Aparencia'],
+        settings: {
+          options: [
+            { value: 'line', label: 'Linha sólida' },
+            { value: 'schema', label: 'Por faixas (schema)' },
+          ],
+        },
+        showIf: (o) => o.useThreshold === true,
       })
       // --- Grafico (panel-level) ---
       .addBooleanSwitch({
