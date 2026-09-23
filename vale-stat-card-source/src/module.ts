@@ -25,7 +25,6 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
             options: [
               { value: 'line', label: 'Linha' },
               { value: 'area', label: 'Area'  },
-              { value: 'bar', label: 'Barra'  },
               { value: 'points', label: 'Pontos'  },
             ],
           },
@@ -120,43 +119,47 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
         path: 'label',
         name: 'Rotulo',
         description: 'Texto exibido no cabecalho do card',
-        defaultValue: 'CPU UTILIZACAO',
+        defaultValue: '',
         category: ['Cabeçalho'],
       })
-      .addSelect({
-        path: 'icon',
-        name: 'Icone',
-        defaultValue: 'cpu',
+      .addRadio({
+        path: 'iconStyle',
+        name: 'Estilo do Ícone',
+        defaultValue: 'contained',
         category: ['Cabeçalho'],
         settings: {
           options: [
-            // Infraestrutura
-            { value: 'cpu',                  label: 'Infra - CPU'              },
-            { value: 'server',               label: 'Infra - Servidor'         },
-            { value: 'server-alt',           label: 'Infra - Servidor (alt)'   },
-            { value: 'database',             label: 'Infra - Banco / Datastore' },
-            { value: 'hdd',                  label: 'Infra - Disco (HDD)'      },
-            { value: 'network-wired',        label: 'Infra - Rede cabeada'     },
-            { value: 'temperature',          label: 'Infra - Temperatura'      },
-            { value: 'wifi',                 label: 'Infra - Wi-Fi / Link'     },
-            { value: 'bolt',                 label: 'Infra - Energia'          },
-            // Status / NOC
-            { value: 'check-circle',         label: 'Status - OK'              },
-            { value: 'exclamation-triangle', label: 'Status - Alerta critico'  },
-            { value: 'alert',                label: 'Status - Alerta'          },
-            { value: 'bell-slash',           label: 'Status - Silenciado'      },
-            { value: 'times-circle',         label: 'Status - Erro / Down'     },
-            // Metricas
-            { value: 'heartbeat',            label: 'Metricas - Saude / Pulso'     },
-            { value: 'arrow-up',             label: 'Metricas - Tendencia subindo' },
-            { value: 'arrow-down',           label: 'Metricas - Tendencia caindo'  },
-            { value: 'chart-line',           label: 'Metricas - Grafico de linha'  },
-            // Diversos
-            { value: 'signal',  label: 'Diversos - Sinal'     },
-            { value: 'clock',   label: 'Diversos - Relogio'   },
-            { value: 'heart',   label: 'Diversos - Saude'     },
-            { value: 'shield',  label: 'Diversos - Seguranca' },
-            { value: 'apps',    label: 'Diversos - Generico'  },
+            { value: 'contained', label: 'Com Fundo' },
+            { value: 'clean', label: 'Livre' },
+          ],
+        },
+      })
+      .addSelect({
+        path: 'icon',
+        name: 'Ícone do Painel',
+        description: 'Selecione o ícone que representa este equipamento/métrica',
+        defaultValue: 'server',
+        category: ['Cabeçalho'],
+        settings: {
+          options: [
+            { label: 'Infraestrutura e Virtualização', options: [
+              { label: 'Servidor / Host', value: 'server' },
+              { label: 'Banco de Dados', value: 'database' },
+              { label: 'Nuvem / Cloud', value: 'cloud' },
+              { label: 'Computador / Desktop', value: 'desktop' },
+            ]},
+            { label: 'Redes e Conectividade', options: [
+              { label: 'Switch / Topologia', value: 'sitemap' },
+              { label: 'Rádio / Wireless', value: 'wifi' },
+              { label: 'Tráfego / Rotas', value: 'exchange' },
+              { label: 'Segurança / Firewall', value: 'shield' },
+            ]},
+            { label: 'Métricas e Status', options: [
+              { label: 'Energia / Tensão', value: 'bolt' },
+              { label: 'Desempenho / Gráfico', value: 'chart-line' },
+              { label: 'Alerta / Atenção', value: 'exclamation-triangle' },
+              { label: 'Informação', value: 'info-circle' },
+            ]}
           ],
         },
       })
@@ -208,6 +211,13 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
         name: 'Usar cor de threshold',
         description: 'Aplica as cores dos thresholds nativos ao valor/linha.',
         defaultValue: false,
+        category: ['Aparencia'],
+      })
+      .addBooleanSwitch({
+        path: 'showThresholdLine',
+        name: 'Mostrar linha de threshold',
+        description: 'Desenha uma linha tracejada no gráfico indicando o limite.',
+        defaultValue: true,
         category: ['Aparencia'],
       })
       .addBooleanSwitch({

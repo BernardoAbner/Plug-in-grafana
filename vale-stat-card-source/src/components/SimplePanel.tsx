@@ -52,7 +52,7 @@ function formatFieldValue(raw: unknown, field: Field, theme: GrafanaTheme2): { t
   // Use Grafana's display logic natively. This handles standard Options like unit, decimals, min, max, thresholds implicitly!
   const displayProcessor = field.display || getDisplayProcessor({ field, theme });
   const display = displayProcessor(raw);
-  return { text: formattedValueToString(display), color: display.color };
+  return { text: display.text + (display.suffix ? display.suffix : ''), color: display.color };
 }
 
 /** Retorna o step de threshold ativo para um valor dado um NativeThresholdsConfig. */
@@ -210,6 +210,14 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: number) 
       color: ${accent};
       flex-shrink: 0;
       svg { width: 14px; height: 14px; }
+    `,
+    iconClean: css`
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: ${accent};
+      flex-shrink: 0;
+      svg { width: 18px; height: 18px; }
     `,
     titleInfo: css`
       display: flex;
@@ -438,13 +446,27 @@ export const SimplePanel: React.FC<Props> = ({
   const effectiveAreaOpacity = (customCfg.areaOpacity ?? 35) / 100;
 
   let singleEffectiveColor = baseColor;
-  if (visibleSeriesInfos.length === 1 && options.useThreshold && !customCfg.lineColor) {
+  let chartThresholdValue: number | undefined;
+  let chartThresholdColor: string | undefined;
+
+  if (visibleSeriesInfos.length === 1) {
     const s = visibleSeriesInfos[0];
-    const last = s.values.length ? s.values[s.values.length - 1] : null;
-    if (last !== null) {
-      const nativeThr = getFieldThresholds(s.field);
-      const step = getActiveNativeThreshold(last, nativeThr);
-      if (step?.color) { singleEffectiveColor = step.color; }
+    const nativeThr = getFieldThresholds(s.field);
+
+    if (options.showThresholdLine && nativeThr?.steps && nativeThr.steps.length > 1) {
+      const step = nativeThr.steps.find(st => st.value !== null);
+      if (step) {
+        chartThresholdValue = step.value as number;
+        chartThresholdColor = step.color;
+      }
+    }
+
+    if (options.useThreshold && !customCfg.lineColor) {
+      const last = s.values.length ? s.values[s.values.length - 1] : null;
+      if (last !== null) {
+        const step = getActiveNativeThreshold(last, nativeThr);
+        if (step?.color) { singleEffectiveColor = step.color; }
+      }
     }
   }
 
@@ -527,14 +549,21 @@ export const SimplePanel: React.FC<Props> = ({
     <div className={cx(styles.card, css`width: ${width}px; height: ${height}px;`)}>
       <div ref={headerRef} className={styles.header}>
         {options.showIcon !== false && (
-          <div className={styles.iconWrap} style={displayValueColor ? { color: displayValueColor, backgroundColor: `${displayValueColor}33` } : undefined}>
-            <Icon name={resolveIconName(options.icon) as any} size="sm" />
+          <div 
+            className={options.iconStyle === 'clean' ? styles.iconClean : styles.iconWrap} 
+            style={
+              displayValueColor 
+                ? { color: displayValueColor, backgroundColor: options.iconStyle === 'clean' ? 'transparent' : `${displayValueColor}33` } 
+                : undefined
+            }
+          >
+            <Icon name={resolveIconName(options.icon) as any} size={options.iconStyle === 'clean' ? 'lg' : 'sm'} />
           </div>
         )}
         <div className={styles.titleInfo}>
           {options.showLabel !== false && (
             <div className={styles.label} style={displayValueColor ? { color: displayValueColor } : undefined}>
-              {options.label}
+              {options.label || (seriesInfos.length > 0 ? seriesInfos[0].name : '')}
             </div>
           )}
           {options.showPeriodSummary && periodSummaryInfos.length === 1 && (
@@ -597,6 +626,8 @@ export const SimplePanel: React.FC<Props> = ({
               theme={theme}
               thresholdMode={options.thresholdMode || 'line'}
               useThreshold={options.useThreshold || false}
+              thresholdValue={chartThresholdValue}
+              thresholdColor={chartThresholdColor}
               getSeriesColor={getSeriesColor}
               axisTextColor={axisTextColor}
               axisLineColor={axisLineColor}

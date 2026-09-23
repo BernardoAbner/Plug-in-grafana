@@ -194,12 +194,14 @@ export interface CustomFieldConfig {
 /** Opções de painel — aparecem na seção "Panel options" da sidebar */
 export interface SimpleOptions {
   label: string;
-  icon: CardIcon;
+  icon: string;
+  iconStyle: 'contained' | 'clean';
   theme: CardTheme;
   showSparkline: boolean;
   showLegend: boolean;
   valueFontSize: number;
   useThreshold: boolean;
+  showThresholdLine: boolean;
   thresholdMode: ThresholdMode;
   // Toggles de visibilidade do cabeçalho
   showIcon: boolean;

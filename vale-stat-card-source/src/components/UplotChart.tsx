@@ -29,14 +29,7 @@ const getTooltipStyles = (theme: any) => ({
     z-index: 99;
     box-shadow: 0 0 0 2px ${theme.isDark ? '#181b24' : '#ffffff'};
   `,
-  crosshairY: css`
-    position: absolute;
-    width: 100%;
-    height: 1px;
-    border-top: 1px dashed ${theme.isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.3)'};
-    pointer-events: none;
-    z-index: 98;
-  `,
+
   time: css`
     font-size: 11px;
     color: ${theme.isDark ? 'rgba(255,255,255,0.5)' : theme.colors.text.secondary};
@@ -105,6 +98,8 @@ export interface UplotChartProps {
   theme: any;
   thresholdMode: ThresholdMode;
   useThreshold: boolean;
+  thresholdValue?: number;
+  thresholdColor?: string;
   getSeriesColor: (s: any) => string;
   axisTextColor: string;
   axisLineColor: string;
@@ -117,14 +112,13 @@ export interface UplotChartProps {
 export const UplotChart: React.FC<UplotChartProps> = ({
   width, height, seriesInfos, times, timeRange, chartType, lineInterpolation, linePattern,
   lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis,
-  yLo, yHi, theme, thresholdMode, useThreshold, getSeriesColor,
+  yLo, yHi, theme, thresholdMode, useThreshold, thresholdValue, thresholdColor, getSeriesColor,
   axisTextColor, axisLineColor, gridLineColor, onHover, onClickTimeRange, onDoubleClick
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const uplotRef = useRef<uPlot | null>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const markerRef = useRef<HTMLDivElement>(null);
-  const crosshairYRef = useRef<HTMLDivElement>(null);
   const tooltipStyles = getTooltipStyles(theme);
 
   useEffect(() => {
@@ -190,10 +184,10 @@ export const UplotChart: React.FC<UplotChartProps> = ({
     const opts: uPlot.Options = {
       width,
       height,
-      padding: [4, 4, 0, 4],
+      padding: [15, 10, 0, 10], // Força 15px de espaço no topo
       cursor: {
         x: true,
-        y: false,
+        y: true, // Cruz nativa do uPlot segue o mouse livremente
         points: {
           show: false, // Desabilitado para usar a bolinha customizada em div
         },
@@ -202,16 +196,23 @@ export const UplotChart: React.FC<UplotChartProps> = ({
       legend: { show: false },
       scales: {
         x: { time: true, range: [timeRange.from / 1000, timeRange.to / 1000] },
-        y: { range: [yLo, yHi] }
+        y: { 
+          auto: !(seriesInfos[0]?.fieldConfig?.min != null && seriesInfos[0]?.fieldConfig?.max != null),
+          range: [
+            seriesInfos[0]?.fieldConfig?.min ?? yLo,
+            seriesInfos[0]?.fieldConfig?.max ?? yHi
+          ]
+        }
       },
       axes: [
         {
           show: showXAxis,
-          size: 26,
+          size: 25,
           space: 90, // Aumentado para não espremer textos de data grandes (DD/MM HH:MM)
           stroke: axisTextColor,
+          border: { show: false },
           grid: { show: showGrid, stroke: gridLineColor },
-          ticks: { show: showXAxis, stroke: axisLineColor },
+          ticks: { show: false, stroke: axisLineColor },
           values: (u, splits) => {
             if (!u.scales.x.min || !u.scales.x.max) return splits.map(v => String(v));
             const minDate = new Date(u.scales.x.min * 1000);
@@ -245,25 +246,49 @@ export const UplotChart: React.FC<UplotChartProps> = ({
       ],
       series: seriesConfig,
       hooks: {
+        draw: [
+          (u) => {
+            if (thresholdValue === undefined || thresholdValue === null) return;
+            
+            const { ctx } = u;
+            // Converter o valor do threshold para a coordenada vertical (pixels)
+            const cy = u.valToPos(thresholdValue, 'y', true);
+
+            // Proteção: Só desenhar se a linha estiver dentro da área visível do gráfico
+            if (cy < u.bbox.top || cy > u.bbox.top + u.bbox.height) return;
+
+            // Desenhar a linha pontilhada
+            ctx.save();
+            ctx.beginPath();
+            // Usar a cor configurada ou um fallback elegante (ex: vermelho translúcido)
+            ctx.strokeStyle = thresholdColor || 'rgba(255, 60, 60, 0.6)';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([5, 5]); // Estilo tracejado premium
+            
+            // Traçar a linha de ponta a ponta na área do gráfico
+            ctx.moveTo(u.bbox.left, cy);
+            ctx.lineTo(u.bbox.left + u.bbox.width, cy);
+            ctx.stroke();
+            ctx.restore();
+          }
+        ],
         setCursor: [
           (u) => {
             const el = tooltipRef.current;
             const markerEl = markerRef.current;
-            const crosshairYEl = crosshairYRef.current;
-            if (!el || !markerEl || !crosshairYEl) return;
+            if (!el || !markerEl) return;
 
             const idx = u.cursor.idx;
 
             if (idx == null || idx < 0) {
               el.style.display = 'none';
               markerEl.style.display = 'none';
-              crosshairYEl.style.display = 'none';
-              onHover(null, null, 0, 0); // Limpa o hover no pai para não conflitar
+              onHover(null, null, 0, 0);
               return;
             }
 
             const ts = times[idx];
-            
+
             const timeEl = el.querySelector('.tooltipTime');
             if (timeEl) timeEl.textContent = formatTooltipTime(ts);
 
@@ -274,7 +299,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
                 const val = s.values[idx];
                 const displayProcessor = s.field.display || getDisplayProcessor({ field: s.field, theme });
                 const display = displayProcessor(val);
-                const formatted = formattedValueToString(display);
+                const formatted = display.text + (display.suffix ? display.suffix : '');
                 const color = getSeriesColor(s);
 
                 const row = document.createElement('div');
@@ -299,44 +324,58 @@ export const UplotChart: React.FC<UplotChartProps> = ({
               });
             }
 
-            // 1 & 2. CONVERTER VALOR PARA PIXELS (A Mágica)
+            // Converter o valor do dado para pixels dentro da área de plotagem
             const xVal = u.data[0][idx];
-            const yVal = u.data[1][idx]; // Assumindo que a métrica é a série 1
+            const yVal = u.data[1][idx]; // série 1 (primeira métrica)
+
+            // cx e cy são coordenadas relativas à área interna de desenho (u.bbox)
             const cx = u.valToPos(xVal, 'x');
-            let cy = u.cursor.top || 0; // fallback caso yVal seja nulo
+            let cy: number | null = null;
             if (yVal != null) {
               cy = u.valToPos(yVal, 'y');
             }
 
-            // 3. ANCORAR A BOLINHA E O TOOLTIP
-            markerEl.style.backgroundColor = seriesInfos.length > 0 ? getSeriesColor(seriesInfos[0]) : '#fff';
-            markerEl.style.left = `${u.bbox.left + cx}px`;
-            markerEl.style.top = `${u.bbox.top + cy}px`;
-            markerEl.style.display = yVal != null ? 'block' : 'none';
-
-            let x = u.bbox.left + cx + 15;
-            let y = u.bbox.top + cy + 15;
-            
-            // Impede que a tooltip saia para a direita do card
-            const maxX = u.bbox.width - el.offsetWidth - 8;
-            if (x > maxX) x = u.bbox.left + cx - el.offsetWidth - 15;
-            if (y < 0) y = 4;
-
-            el.style.transform = `translate(${x}px, ${y}px)`;
-            el.style.display = 'block';
-
-            // 4. ANCORAR A LINHA HORIZONTAL (Crosshair Y) customizada
-            if (yVal != null) {
-              crosshairYEl.style.left = `${u.bbox.left}px`;
-              crosshairYEl.style.width = `${u.bbox.width}px`;
-              crosshairYEl.style.top = `${u.bbox.top + cy}px`;
-              crosshairYEl.style.display = 'block';
+            // BOLINHA: posicionar no pixel exato do dado.
+            // u.bbox.left/top converte de coords internas para coords do container.
+            // transform: translate(-50%, -50%) centraliza o centro da bolinha no pixel.
+            if (cy != null) {
+              markerEl.style.left = `${cx + u.bbox.left / window.devicePixelRatio}px`;
+              markerEl.style.top = `${cy + u.bbox.top / window.devicePixelRatio}px`;
+              markerEl.style.transform = 'translate(-50%, -50%)';
+              markerEl.style.backgroundColor = seriesInfos.length > 0 ? getSeriesColor(seriesInfos[0]) : '#fff';
+              markerEl.style.display = 'block';
             } else {
-              crosshairYEl.style.display = 'none';
+              markerEl.style.display = 'none';
             }
 
-            // Pass null points para desabilitar tooltip do painel antigo e parar de re-renderizar
-            onHover(ts, null, cx, cy);
+            // TOOLTIP: Inversão Dinâmica (Collision Detection)
+            if (cy != null) {
+              // 1. Ler dimensões reais do tooltip (com fallback seguro)
+              const tooltipWidth  = el.offsetWidth  || 200;
+              const tooltipHeight = el.offsetHeight || 80;
+
+              // 2. Lógica de Flip no eixo Y (Baixo → Cima)
+              // u.bbox usa pixels físicos; cx/cy já estão em px CSS (valToPos retorna CSS px)
+              const offsetY = (cy + tooltipHeight + 15 > u.bbox.height / window.devicePixelRatio)
+                ? -(tooltipHeight + 15)  // Inverte: tooltip vai para CIMA da bolinha
+                : 15;                    // Padrão: tooltip vai para BAIXO da bolinha
+
+              // 3. Lógica de Flip no eixo X (Direita → Esquerda)
+              const offsetX = (cx + tooltipWidth + 15 > u.bbox.width / window.devicePixelRatio)
+                ? -(tooltipWidth + 15)   // Inverte: tooltip vai para a ESQUERDA da bolinha
+                : 15;                    // Padrão: tooltip vai para a DIREITA da bolinha
+
+              // 4. Coordenadas finais absolutas (relativas ao container do gráfico)
+              const finalTop  = cy + u.bbox.top  / window.devicePixelRatio + offsetY;
+              const finalLeft = cx + u.bbox.left / window.devicePixelRatio + offsetX;
+
+              el.style.transform = `translate(${finalLeft}px, ${finalTop}px)`;
+              el.style.display = 'block';
+            } else {
+              el.style.display = 'none';
+            }
+
+            onHover(ts, null, cx, cy ?? 0);
           }
         ],
         setSelect: [
@@ -364,7 +403,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
         uplotRef.current = null;
       }
     };
-  }, [width, height, times, timeRange, seriesInfos, chartType, lineInterpolation, linePattern, lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis, yLo, yHi, theme, thresholdMode, useThreshold, getSeriesColor, axisTextColor, axisLineColor, gridLineColor]);
+  }, [width, height, times, timeRange, seriesInfos, chartType, lineInterpolation, linePattern, lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis, yLo, yHi, theme, thresholdMode, useThreshold, thresholdValue, thresholdColor, getSeriesColor, axisTextColor, axisLineColor, gridLineColor]);
 
   // Update size without recreating instance if only dimensions change
   useEffect(() => {
@@ -379,7 +418,6 @@ export const UplotChart: React.FC<UplotChartProps> = ({
       onDoubleClick={onDoubleClick}
     >
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
-      <div ref={crosshairYRef} className={tooltipStyles.crosshairY} style={{ display: 'none' }} />
       <div ref={markerRef} className={tooltipStyles.marker} style={{ display: 'none' }} />
       <div ref={tooltipRef} className={tooltipStyles.tooltip} style={{ display: 'none' }}>
         <div className={`tooltipTime ${tooltipStyles.time}`}></div>
