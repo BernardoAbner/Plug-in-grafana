@@ -19,15 +19,25 @@ import { UplotChart } from './UplotChart';
 
 interface Props extends PanelProps<SimpleOptions> { }
 
+const VALID_ICONS = new Set([
+  'sitemap', 'wifi', 'signal', 'exchange', 'plug', 'link', 'code-branch', 'share-alt', 'shield', 'globe', 'sync', 'rss',
+  'server', 'cube', 'cubes', 'layer-group', 'database', 'hdd', 'cloud', 'desktop', 'terminal',
+  'bolt', 'battery-bolt', 'battery-full', 'battery-empty', 'thermometer', 'tachometer-fast', 'heartbeat', 'sliders-v-alt', 'chart-line', 'clock-nine', 'history',
+  'exclamation-triangle', 'times-circle', 'check-circle', 'bell', 'wrench', 'cog', 'lock', 'key-skeleton-alt', 'info-circle', 'filter', 'eye', 'apps'
+]);
+
 function resolveIconName(icon: string): string {
-  // Trata ícones legados ou ajusta semântica
-  if (icon === 'processor') return 'cpu';
-  if (icon === 'wifi') return 'signal';
-  if (icon === 'hdd') return 'save';
-  if (icon === 'times-circle') return 'times';
-  if (icon === 'temperature') return 'gf-interpolation';
+  // Trata ícones legados para os novos correspondentes
+  if (icon === 'processor' || icon === 'cpu') return 'tachometer-fast';
+  if (icon === 'temperature') return 'thermometer';
+  if (icon === 'save') return 'hdd';
+  if (icon === 'times') return 'times-circle';
   
-  return icon || 'apps';
+  if (icon && VALID_ICONS.has(icon)) {
+    return icon;
+  }
+  
+  return 'server';
 }
 
 // ─── Paleta de temas ───────────────────────────────────────────────────────
@@ -274,13 +284,25 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: number) 
       user-select: none;
       -webkit-user-select: none;
 
-      /* uPlot drag selection box */
+      /* uPlot drag selection box — só visível quando o usuário arrasta.
+         IMPORTANTE: NÃO usar border aqui! Com width:0 height:0 (estado
+         inicial/repouso), uma border de 1px ainda renderiza um ponto
+         visível no canto (0,0). Usar outline em vez de border resolve
+         isso porque outline não afeta elementos com dimensão zero. */
       .u-select {
         background: rgba(128, 128, 128, 0.2);
-        border: 1px solid rgba(128, 128, 128, 0.4);
+        outline: 1px solid rgba(128, 128, 128, 0.4);
+        outline-offset: -1px;
         position: absolute;
         pointer-events: none;
         z-index: 10;
+      }
+
+      /* Suprimir o ponto nativo do uPlot (u-cursor-pt).
+         Usamos nosso próprio marker div customizado, então
+         este elemento nunca deve ser visível. */
+      .u-cursor-pt {
+        display: none !important;
       }
     `,
     chartSvg: css`
@@ -354,6 +376,76 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: number) 
       font-family: ${theme.typography.fontFamilyMonospace};
       flex-shrink: 0;
     `,
+    // ─── Multi-Métrica: Grade de KPI Cards ───────────────────────────────────
+    multiGrid: css`
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: ${theme.spacing(0.75)};
+      padding: ${theme.spacing(1)} ${theme.spacing(1.5)} ${theme.spacing(0.5)};
+      z-index: 3;
+      flex-shrink: 0;
+    `,
+    multiCard: css`
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      background: ${theme.isDark ? 'rgba(255, 255, 255, 0.03)' : 'rgba(0, 0, 0, 0.03)'};
+      border: 1px solid ${theme.isDark ? 'rgba(255, 255, 255, 0.07)' : 'rgba(0, 0, 0, 0.07)'};
+      cursor: pointer;
+      transition: opacity 0.2s ease, border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+      &:hover {
+        background: ${theme.isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.06)'};
+        border-color: ${theme.isDark ? 'rgba(255, 255, 255, 0.14)' : 'rgba(0, 0, 0, 0.14)'};
+      }
+    `,
+    multiCardSelected: css`
+      box-shadow: 0 0 8px ${theme.isDark ? 'rgba(0, 0, 0, 0.3)' : 'rgba(0, 0, 0, 0.1)'};
+    `,
+    multiCardLeft: css`
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    `,
+    multiCardIcon: css`
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    `,
+    multiCardTextCol: css`
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    `,
+    multiCardLabel: css`
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: #9CA3AF;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    `,
+    multiCardValue: css`
+      font-size: 16px;
+      font-weight: 700;
+      color: #FFFFFF;
+      white-space: nowrap;
+      flex-shrink: 0;
+    `,
+    multiCardSummary: css`
+      font-size: 10px;
+      color: #6B7280;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-variant-numeric: tabular-nums;
+    `,
   };
 };
 
@@ -372,6 +464,7 @@ export const SimplePanel: React.FC<Props> = ({
   const [headerH, setHeaderH] = useState(52);
   const [hover, setHover] = useState<HoverState | null>(null);
   const [hiddenSeries, setHiddenSeries] = useState<Set<number>>(new Set());
+  const [selectedSeriesIndex, setSelectedSeriesIndex] = useState<number | null>(null);
 
   useLayoutEffect(() => {
     if (headerRef.current) { setHeaderH(headerRef.current.offsetHeight); }
@@ -387,6 +480,10 @@ export const SimplePanel: React.FC<Props> = ({
       }
       return next;
     });
+  }, []);
+
+  const handleCardClick = useCallback((idx: number) => {
+    setSelectedSeriesIndex((prev) => (prev === idx ? null : idx));
   }, []);
 
   // ── Processamento de dados ─────────────────────────────────────────────────
@@ -547,45 +644,110 @@ export const SimplePanel: React.FC<Props> = ({
 
   return (
     <div className={cx(styles.card, css`width: ${width}px; height: ${height}px;`)}>
-      <div ref={headerRef} className={styles.header}>
-        {options.showIcon !== false && (
-          <div 
-            className={options.iconStyle === 'clean' ? styles.iconClean : styles.iconWrap} 
-            style={
-              displayValueColor 
-                ? { color: displayValueColor, backgroundColor: options.iconStyle === 'clean' ? 'transparent' : `${displayValueColor}33` } 
-                : undefined
-            }
-          >
-            <Icon name={resolveIconName(options.icon) as any} size={options.iconStyle === 'clean' ? 'lg' : 'sm'} />
-          </div>
-        )}
-        <div className={styles.titleInfo}>
-          {options.showLabel !== false && (
-            <div className={styles.label} style={displayValueColor ? { color: displayValueColor } : undefined}>
-              {options.label || (seriesInfos.length > 0 ? seriesInfos[0].name : '')}
+      {/* ── HEADER: Modo single-série (layout original) ── */}
+      {allSeriesInfos.length <= 1 && (
+        <div ref={headerRef} className={styles.header}>
+          {options.showIcon !== false && (
+            <div 
+              className={options.iconStyle === 'clean' ? styles.iconClean : styles.iconWrap} 
+              style={
+                displayValueColor 
+                  ? { color: displayValueColor, backgroundColor: options.iconStyle === 'clean' ? 'transparent' : `${displayValueColor}33` } 
+                  : undefined
+              }
+            >
+              <Icon name={resolveIconName(options.icon) as any} size={options.iconStyle === 'clean' ? 'lg' : 'sm'} />
             </div>
           )}
-          {options.showPeriodSummary && periodSummaryInfos.length === 1 && (
-            <div className={styles.periodSummary}>
-              {options.showPeriodMin && periodMin !== null && <span className={styles.periodStat}>Mínimo {formatFieldValue(periodMin, periodSummaryInfos[0].field, theme).text}</span>}
-              {options.showPeriodAverage && periodAverage !== null && <span className={styles.periodStat}>Média {formatFieldValue(periodAverage, periodSummaryInfos[0].field, theme).text}</span>}
-              {options.showPeriodPeak && periodPeak !== null && <span className={styles.periodStat}>Pico {formatFieldValue(periodPeak, periodSummaryInfos[0].field, theme).text}</span>}
-              {alertDurations.map((alert) => (
-                <span key={alert.value} className={styles.periodStat} style={{ color: alert.color }}>
-                  ≥ {formatFieldValue(alert.value, periodSummaryInfos[0].field, theme).text}: {humanDuration(alert.durationMs, 'ms')}
-                </span>
-              ))}
-            </div>
+          <div className={styles.titleInfo}>
+            {options.showLabel !== false && (
+              <div className={styles.label} style={displayValueColor ? { color: displayValueColor } : undefined}>
+                {options.label || (seriesInfos.length > 0 ? seriesInfos[0].name : '')}
+              </div>
+            )}
+            {options.showPeriodSummary && periodSummaryInfos.length === 1 && (
+              <div className={styles.periodSummary}>
+                {options.showPeriodMin && periodMin !== null && <span className={styles.periodStat}>Mínimo {formatFieldValue(periodMin, periodSummaryInfos[0].field, theme).text}</span>}
+                {options.showPeriodAverage && periodAverage !== null && <span className={styles.periodStat}>Média {formatFieldValue(periodAverage, periodSummaryInfos[0].field, theme).text}</span>}
+                {options.showPeriodPeak && periodPeak !== null && <span className={styles.periodStat}>Pico {formatFieldValue(periodPeak, periodSummaryInfos[0].field, theme).text}</span>}
+                {alertDurations.map((alert) => (
+                  <span key={alert.value} className={styles.periodStat} style={{ color: alert.color }}>
+                    ≥ {formatFieldValue(alert.value, periodSummaryInfos[0].field, theme).text}: {humanDuration(alert.durationMs, 'ms')}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {!hasMultipleSeries && options.showValue !== false && (
+            <span className={styles.value} style={displayValueColor ? { color: displayValueColor } : undefined}>
+              {displayValue ?? '—'}
+            </span>
           )}
         </div>
+      )}
 
-        {!hasMultipleSeries && options.showValue !== false && (
-          <span className={styles.value} style={displayValueColor ? { color: displayValueColor } : undefined}>
-            {displayValue ?? '—'}
-          </span>
-        )}
-      </div>
+      {/* ── HEADER: Modo multi-métrica (grade de KPI Cards) ── */}
+      {allSeriesInfos.length >= 2 && (
+        <div ref={headerRef} className={styles.multiGrid}>
+          {allSeriesInfos.map((s, idx) => {
+            const isSelected = selectedSeriesIndex === idx;
+            const isDimmed = selectedSeriesIndex !== null && !isSelected;
+            const lastVal = s.values.length ? s.values[s.values.length - 1] : null;
+            const formattedVal = lastVal !== null ? formatFieldValue(lastVal, s.field, theme).text : '—';
+            const seriesColor = getSeriesColor(s);
+
+            // Resumo do período para este card
+            const validVals = s.values.filter((v) => v !== null && !isNaN(v));
+            const cardMin = validVals.length ? Math.min(...validVals) : null;
+            const cardAvg = validVals.length ? validVals.reduce((a, b) => a + b, 0) / validVals.length : null;
+            const cardMax = validVals.length ? Math.max(...validVals) : null;
+
+            // Montar texto de resumo compacto
+            const summaryParts: string[] = [];
+            if (options.showPeriodSummary) {
+              if (options.showPeriodMin && cardMin !== null) {
+                summaryParts.push(`Min ${formatFieldValue(cardMin, s.field, theme).text}`);
+              }
+              if (options.showPeriodAverage && cardAvg !== null) {
+                summaryParts.push(`Méd ${formatFieldValue(cardAvg, s.field, theme).text}`);
+              }
+              if (options.showPeriodPeak && cardMax !== null) {
+                summaryParts.push(`Max ${formatFieldValue(cardMax, s.field, theme).text}`);
+              }
+            }
+
+            return (
+              <div
+                key={s.name}
+                className={cx(styles.multiCard, isSelected && styles.multiCardSelected)}
+                style={{ 
+                  opacity: isDimmed ? 0.35 : 1,
+                  ...(isSelected ? { borderColor: seriesColor } : {})
+                }}
+                onClick={() => handleCardClick(idx)}
+              >
+                <div className={styles.multiCardLeft}>
+                  <div className={styles.multiCardIcon} style={{ color: seriesColor }}>
+                    <Icon name={resolveIconName(options.icon) as any} size="lg" />
+                  </div>
+                  <div className={styles.multiCardTextCol}>
+                    <span className={styles.multiCardLabel}>{s.name}</span>
+                    {summaryParts.length > 0 && (
+                      <span className={styles.multiCardSummary}>
+                        {summaryParts.join(' · ')}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className={styles.multiCardValue}>
+                  {formattedVal}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {options.showSparkline && (
         <div className={styles.chartWrap}>
@@ -608,8 +770,8 @@ export const SimplePanel: React.FC<Props> = ({
             <UplotChart
               width={plotW + PAD_LEFT + PAD_RIGHT + Y_AXIS_W}
               height={svgH}
-              seriesInfos={seriesInfos}
-              times={seriesInfos[0]?.timeValues || []}
+              seriesInfos={allSeriesInfos}
+              times={allSeriesInfos[0]?.timeValues || []}
               timeRange={{ from: tStart, to: tEnd }}
               chartType={chartType}
               lineInterpolation={lineInterpolation}
@@ -632,6 +794,7 @@ export const SimplePanel: React.FC<Props> = ({
               axisTextColor={axisTextColor}
               axisLineColor={axisLineColor}
               gridLineColor={gridLineColor}
+              selectedSeriesIndex={selectedSeriesIndex}
               onHover={(ts, points, px, py) => {
                 if (!ts || !points) {
                   setHover(null);
@@ -642,7 +805,7 @@ export const SimplePanel: React.FC<Props> = ({
                     py,
                     points: points.map(p => ({
                       name: p.name,
-                      value: formatFieldValue(p.rawVal, seriesInfos.find(s => s.name === p.name)!.field, theme).text,
+                      value: formatFieldValue(p.rawVal, allSeriesInfos.find(s => s.name === p.name)!.field, theme).text,
                       color: p.color
                     }))
                   });

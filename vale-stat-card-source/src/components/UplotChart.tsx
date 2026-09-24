@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useCallback } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import { ChartType, LineInterpolation, LinePattern, ThresholdMode } from '../types';
@@ -104,6 +104,7 @@ export interface UplotChartProps {
   axisTextColor: string;
   axisLineColor: string;
   gridLineColor: string;
+  selectedSeriesIndex: number | null;
   onHover: (ts: number | null, points: any[] | null, px: number, py: number) => void;
   onClickTimeRange?: (from: number, to: number) => void;
   onDoubleClick?: () => void;
@@ -113,13 +114,40 @@ export const UplotChart: React.FC<UplotChartProps> = ({
   width, height, seriesInfos, times, timeRange, chartType, lineInterpolation, linePattern,
   lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis,
   yLo, yHi, theme, thresholdMode, useThreshold, thresholdValue, thresholdColor, getSeriesColor,
-  axisTextColor, axisLineColor, gridLineColor, onHover, onClickTimeRange, onDoubleClick
+  axisTextColor, axisLineColor, gridLineColor, selectedSeriesIndex, onHover, onClickTimeRange, onDoubleClick
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const uplotRef = useRef<uPlot | null>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
-  const markerRef = useRef<HTMLDivElement>(null);
+  const markersContainerRef = useRef<HTMLDivElement>(null);
+  // Flag própria e explícita: só vira true com mouseenter REAL do browser,
+  // independente de qualquer lógica interna do uPlot.
+  const hasRealHoverRef = useRef<boolean>(false);
   const tooltipStyles = getTooltipStyles(theme);
+
+  // Funções de hide/show para marker e tooltip — centralizadas para evitar duplicação
+  const hideOverlays = useCallback(() => {
+    if (markersContainerRef.current) {
+      const children = markersContainerRef.current.children;
+      for (let i = 0; i < children.length; i++) {
+        (children[i] as HTMLElement).style.display = 'none';
+      }
+    }
+    if (tooltipRef.current) { tooltipRef.current.style.display = 'none'; }
+  }, []);
+
+  // Handlers de mouse no wrapper div React (não no uPlot overlay!)
+  // Assim eles sobrevivem a recriações do uPlot sem perder o tracking.
+  const handleMouseEnter = useCallback(() => {
+    hasRealHoverRef.current = true;
+  }, []);
+
+  const handleMouseLeave = useCallback(() => {
+    hasRealHoverRef.current = false;
+    hideOverlays();
+    onHover(null, null, 0, 0);
+  }, [hideOverlays, onHover]);
 
   useEffect(() => {
     if (!containerRef.current || times.length === 0) return;
@@ -165,9 +193,11 @@ export const UplotChart: React.FC<UplotChartProps> = ({
         dash,
         paths: chartType === 'bar' ? uPlot.paths.bars!() : getPaths(),
         points: {
-          show: showPoints || undefined,
-          size: pointSize * 2, // pointSize was radius in SVG
-          fill: color,
+          // IMPORTANTE: false explícito quando não queremos pontos.
+          // `showPoints || undefined` é errado porque `false || undefined = undefined`,
+          // e undefined faz o uPlot usar o comportamento padrão (mostrar pontos!).
+          show: showPoints ? true : false,
+          size: showPoints ? pointSize * 2 : 0,
         },
         fill: (u, seriesIdx) => {
           if (chartType !== 'area') return 'rgba(0,0,0,0)';
@@ -275,14 +305,24 @@ export const UplotChart: React.FC<UplotChartProps> = ({
         setCursor: [
           (u) => {
             const el = tooltipRef.current;
-            const markerEl = markerRef.current;
-            if (!el || !markerEl) return;
+            const markersContainer = markersContainerRef.current;
+            if (!el || !markersContainer) return;
 
             const idx = u.cursor.idx;
 
-            if (idx == null || idx < 0) {
+            // CONDIÇÃO DUPLA DE SEGURANÇA:
+            // 1. hasRealHoverRef — controlado EXCLUSIVAMENTE por mouseenter/leave no wrapper div React
+            // 2. idx válido — o uPlot reporta um índice de dado real
+            // Ambas devem ser true para mostrar qualquer coisa.
+            const shouldShow = hasRealHoverRef.current === true
+              && idx !== undefined && idx !== null && idx >= 0;
+
+            if (!shouldShow) {
+              const children = markersContainer.children;
+              for (let i = 0; i < children.length; i++) {
+                (children[i] as HTMLElement).style.display = 'none';
+              }
               el.style.display = 'none';
-              markerEl.style.display = 'none';
               onHover(null, null, 0, 0);
               return;
             }
@@ -295,7 +335,9 @@ export const UplotChart: React.FC<UplotChartProps> = ({
             const rowsEl = el.querySelector('.tooltipRows');
             if (rowsEl) {
               rowsEl.innerHTML = '';
-              seriesInfos.forEach((s) => {
+              seriesInfos.forEach((s, idxSeries) => {
+                if (selectedSeriesIndex !== null && selectedSeriesIndex !== idxSeries) return;
+
                 const val = s.values[idx];
                 const displayProcessor = s.field.display || getDisplayProcessor({ field: s.field, theme });
                 const display = displayProcessor(val);
@@ -326,30 +368,41 @@ export const UplotChart: React.FC<UplotChartProps> = ({
 
             // Converter o valor do dado para pixels dentro da área de plotagem
             const xVal = u.data[0][idx];
-            const yVal = u.data[1][idx]; // série 1 (primeira métrica)
-
-            // cx e cy são coordenadas relativas à área interna de desenho (u.bbox)
+            // cx é coordenada relativa à área interna de desenho (u.bbox)
             const cx = u.valToPos(xVal, 'x');
-            let cy: number | null = null;
-            if (yVal != null) {
-              cy = u.valToPos(yVal, 'y');
-            }
+            
+            let firstActiveCy: number | null = null;
+            const markerChildren = markersContainer.children;
 
-            // BOLINHA: posicionar no pixel exato do dado.
-            // u.bbox.left/top converte de coords internas para coords do container.
-            // transform: translate(-50%, -50%) centraliza o centro da bolinha no pixel.
-            if (cy != null) {
-              markerEl.style.left = `${cx + u.bbox.left / window.devicePixelRatio}px`;
-              markerEl.style.top = `${cy + u.bbox.top / window.devicePixelRatio}px`;
-              markerEl.style.transform = 'translate(-50%, -50%)';
-              markerEl.style.backgroundColor = seriesInfos.length > 0 ? getSeriesColor(seriesInfos[0]) : '#fff';
-              markerEl.style.display = 'block';
-            } else {
-              markerEl.style.display = 'none';
-            }
+            // BOLINHAS: posicionar cada uma no pixel exato do dado.
+            seriesInfos.forEach((s, idxSeries) => {
+              const markerEl = markerChildren[idxSeries] as HTMLElement;
+              if (!markerEl) return;
 
-            // TOOLTIP: Inversão Dinâmica (Collision Detection)
-            if (cy != null) {
+              if (selectedSeriesIndex !== null && selectedSeriesIndex !== idxSeries) {
+                markerEl.style.display = 'none';
+                return;
+              }
+
+              const yVal = u.data[idxSeries + 1][idx];
+              if (yVal != null) {
+                const cy = u.valToPos(yVal, 'y');
+                if (firstActiveCy === null) firstActiveCy = cy;
+                
+                markerEl.style.display = 'block';
+                markerEl.style.left = `${cx + u.bbox.left / window.devicePixelRatio}px`;
+                markerEl.style.top = `${cy + u.bbox.top / window.devicePixelRatio}px`;
+                markerEl.style.transform = 'translate(-50%, -50%)';
+                markerEl.style.backgroundColor = getSeriesColor(s);
+              } else {
+                markerEl.style.display = 'none';
+              }
+            });
+
+            // TOOLTIP: Inversão Dinâmica (Collision Detection) ancorado na primeira série ativa
+            if (firstActiveCy != null) {
+              const cy = firstActiveCy;
+              el.style.display = 'block';
               // 1. Ler dimensões reais do tooltip (com fallback seguro)
               const tooltipWidth  = el.offsetWidth  || 200;
               const tooltipHeight = el.offsetHeight || 80;
@@ -370,12 +423,11 @@ export const UplotChart: React.FC<UplotChartProps> = ({
               const finalLeft = cx + u.bbox.left / window.devicePixelRatio + offsetX;
 
               el.style.transform = `translate(${finalLeft}px, ${finalTop}px)`;
-              el.style.display = 'block';
             } else {
               el.style.display = 'none';
             }
 
-            onHover(ts, null, cx, cy ?? 0);
+            onHover(ts, null, cx, firstActiveCy ?? 0);
           }
         ],
         setSelect: [
@@ -394,7 +446,12 @@ export const UplotChart: React.FC<UplotChartProps> = ({
     if (uplotRef.current) {
       uplotRef.current.destroy();
     }
-    
+
+    // Resetar a flag de hover antes de recriar — a recriação do uPlot
+    // pode disparar setCursor internamente, e não queremos que isso
+    // herde um hasRealHoverRef=true de um hover anterior.
+    hasRealHoverRef.current = false;
+
     uplotRef.current = new uPlot(opts, data, containerRef.current);
 
     return () => {
@@ -412,17 +469,39 @@ export const UplotChart: React.FC<UplotChartProps> = ({
     }
   }, [width, height]);
 
+  // ── Click-to-Solo: Alternar visibilidade de séries via API nativa do uPlot ──
+  // Usa setSeries() para mostrar/esconder séries sem recriar a instância inteira.
+  useEffect(() => {
+    const u = uplotRef.current;
+    if (!u) return;
+    u.series.forEach((s, idx) => {
+      if (idx === 0) return; // ignora o eixo X (tempo)
+      const shouldShow = selectedSeriesIndex === null || selectedSeriesIndex === (idx - 1);
+      if (s.show !== shouldShow) {
+        u.setSeries(idx, { show: shouldShow });
+      }
+    });
+  }, [selectedSeriesIndex]);
+
   return (
     <div 
+      ref={wrapperRef}
       style={{ width: '100%', height: '100%', position: 'absolute', inset: 0 }} 
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
       onDoubleClick={onDoubleClick}
     >
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
-      <div ref={markerRef} className={tooltipStyles.marker} style={{ display: 'none' }} />
-      <div ref={tooltipRef} className={tooltipStyles.tooltip} style={{ display: 'none' }}>
+      <div ref={markersContainerRef} style={{ pointerEvents: 'none', position: 'absolute', inset: 0, overflow: 'hidden' }}>
+        {seriesInfos.map((_, i) => (
+          <div key={i} className={tooltipStyles.marker} style={{ display: 'none' }} />
+        ))}
+      </div>
+      <div ref={tooltipRef} className={tooltipStyles.tooltip} style={{ display: 'none', pointerEvents: 'none' }}>
         <div className={`tooltipTime ${tooltipStyles.time}`}></div>
         <div className="tooltipRows"></div>
       </div>
     </div>
   );
 };
+
