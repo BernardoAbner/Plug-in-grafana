@@ -65,6 +65,31 @@ function formatFieldValue(raw: unknown, field: Field, theme: GrafanaTheme2): { t
   return { text: display.text + (display.suffix ? display.suffix : ''), color: display.color };
 }
 
+function getThresholdAlert(val: number, field: Field, theme: GrafanaTheme2): { isAlert: boolean; color: string } {
+  const displayProcessor = field.display || getDisplayProcessor({ field, theme });
+  const display = displayProcessor(val);
+  const thresholds = field.config.thresholds?.steps;
+  
+  if (!display || !thresholds || thresholds.length <= 1) {
+    return { isAlert: false, color: '#9CA3AF' };
+  }
+
+  const baseColor = thresholds[0].color;
+  const isViolated = display.color !== baseColor && display.color !== undefined;
+
+  return {
+    isAlert: isViolated,
+    color: display.color || '#9CA3AF',
+  };
+}
+
+const badgeAlertStyle = (color: string): React.CSSProperties => ({
+  color: color,
+  fontWeight: 600,
+});
+
+const normalStatStyle: React.CSSProperties = { color: '#9CA3AF' };
+
 /** Retorna o step de threshold ativo para um valor dado um NativeThresholdsConfig. */
 function getActiveNativeThreshold(
   value: number,
@@ -165,7 +190,7 @@ export interface SeriesInfo {
 }
 
 // ─── Estilos ───────────────────────────────────────────────────────────────
-const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: number) => {
+const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string | number) => {
   const baseBg = theme.isDark ? '#0c101b' : theme.colors.background.primary;
   const themeGrad = `linear-gradient(180deg, ${accent}12 0%, ${accent}02 100%)`;
   const borderColor = theme.isDark ? 'rgba(255,255,255,0.06)' : theme.colors.border.weak;
@@ -216,7 +241,8 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: number) 
       width: 26px;
       height: 26px;
       border-radius: 8px;
-      background: ${accent}33;
+      background: color-mix(in srgb, ${accent} 20%, transparent);
+      border: 1px solid color-mix(in srgb, ${accent} 30%, transparent);
       color: ${accent};
       flex-shrink: 0;
       svg { width: 14px; height: 14px; }
@@ -249,7 +275,7 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: number) 
       font-weight: ${theme.typography.fontWeightMedium};
     `,
     value: css`
-      font-size: ${valueFontSize}px;
+      font-size: ${typeof valueFontSize === 'number' ? valueFontSize + 'px' : valueFontSize};
       font-weight: ${theme.typography.fontWeightBold};
       color: ${valueTextColor};
       line-height: 1;
@@ -392,17 +418,18 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: number) 
       gap: 12px;
       padding: 8px 12px;
       border-radius: 6px;
-      background: ${theme.isDark ? 'rgba(255, 255, 255, 0.03)' : 'rgba(0, 0, 0, 0.03)'};
-      border: 1px solid ${theme.isDark ? 'rgba(255, 255, 255, 0.07)' : 'rgba(0, 0, 0, 0.07)'};
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: none;
       cursor: pointer;
-      transition: opacity 0.2s ease, border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+      transition: opacity 0.2s ease, border-color 0.2s ease, background 0.2s ease;
       &:hover {
-        background: ${theme.isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.06)'};
-        border-color: ${theme.isDark ? 'rgba(255, 255, 255, 0.14)' : 'rgba(0, 0, 0, 0.14)'};
+        border-color: rgba(255, 255, 255, 0.16);
       }
     `,
     multiCardSelected: css`
-      box-shadow: 0 0 8px ${theme.isDark ? 'rgba(0, 0, 0, 0.3)' : 'rgba(0, 0, 0, 0.1)'};
+      border: 1px solid var(--card-color) !important;
+      box-shadow: none !important;
     `,
     multiCardLeft: css`
       display: flex;
@@ -414,7 +441,22 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: number) 
       display: flex;
       align-items: center;
       justify-content: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--card-color) 20%, transparent);
+      border: 1px solid color-mix(in srgb, var(--card-color) 30%, transparent);
+      color: var(--card-color);
       flex-shrink: 0;
+      svg { width: 14px; height: 14px; }
+    `,
+    multiCardIconClean: css`
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--card-color);
+      flex-shrink: 0;
+      svg { width: 18px; height: 18px; }
     `,
     multiCardTextCol: css`
       display: flex;
@@ -426,13 +468,13 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: number) 
       font-size: 11px;
       font-weight: 600;
       text-transform: uppercase;
-      color: #9CA3AF;
+      color: var(--card-color);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     `,
     multiCardValue: css`
-      font-size: 16px;
+      font-size: 18px;
       font-weight: 700;
       color: #FFFFFF;
       white-space: nowrap;
@@ -440,7 +482,7 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: number) 
     `,
     multiCardSummary: css`
       font-size: 10px;
-      color: #6B7280;
+      color: #9CA3AF;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -468,7 +510,7 @@ export const SimplePanel: React.FC<Props> = ({
 
   useLayoutEffect(() => {
     if (headerRef.current) { setHeaderH(headerRef.current.offsetHeight); }
-  }, [options.valueFontSize, options.label, options.icon, options.showIcon, options.showLabel, options.showValue, width]);
+  }, [options.valueFontSize, options.showIcon, options.showLabel, options.showCurrentValue, width]);
 
   const toggleSeries = useCallback((idx: number) => {
     setHiddenSeries((prev) => {
@@ -488,7 +530,7 @@ export const SimplePanel: React.FC<Props> = ({
 
   // ── Processamento de dados ─────────────────────────────────────────────────
   // (useMemo #1 — deve vir antes de qualquer return condicional)
-  const { displayValue, hasMultipleSeries, allSeriesInfos, visibleSeriesInfos } = useMemo(() => {
+  const { displayValue, displayColor, hasMultipleSeries, allSeriesInfos, visibleSeriesInfos } = useMemo(() => {
     const infos: SeriesInfo[] = [];
     data.series.forEach((s) => {
       const timeField = s.fields.find((f) => f.type === FieldType.time);
@@ -514,14 +556,17 @@ export const SimplePanel: React.FC<Props> = ({
     const visibleInfos = infos.filter((_, idx) => !hiddenSeries.has(idx));
 
     let displayValue: string | null = null;
+    let displayColor: string | undefined = undefined;
     if (visibleInfos.length === 1) {
       const s = visibleInfos[0];
       const last = s.values.length ? s.values[s.values.length - 1] : null;
       if (last !== null) {
-        displayValue = formatFieldValue(last, s.field, theme).text;
+        const formatted = formatFieldValue(last, s.field, theme);
+        displayValue = formatted.text;
+        displayColor = formatted.color;
       }
     }
-    return { displayValue, hasMultipleSeries: visibleInfos.length > 1, allSeriesInfos: infos, visibleSeriesInfos: visibleInfos };
+    return { displayValue, displayColor, hasMultipleSeries: visibleInfos.length > 1, allSeriesInfos: infos, visibleSeriesInfos: visibleInfos };
   }, [data, accent, hiddenSeries]);
 
   // Use visibleSeriesInfos for chart rendering calculations
@@ -531,9 +576,9 @@ export const SimplePanel: React.FC<Props> = ({
   const firstField = seriesInfos[0]?.field ?? allSeriesInfos[0]?.field;
   const customCfg = (firstField?.config?.custom ?? {}) as Record<string, any>;
   const chartType = customCfg.chartType ?? 'area';
-  const showGrid = customCfg.showGrid ?? false;
-  const showYAxis = customCfg.showYAxis ?? false;
-  const showXAxis = customCfg.showXAxis ?? false;
+  const showGrid = options.showGrid ?? false;
+  const showYAxis = options.showYAxis ?? false;
+  const showXAxis = options.showXAxis ?? false;
   const lineInterpolation = customCfg.lineInterpolation ?? 'straight';
   const linePattern = customCfg.linePattern ?? 'solid';
   const lineWidth = customCfg.lineWidth ?? 2;
@@ -542,22 +587,27 @@ export const SimplePanel: React.FC<Props> = ({
   const baseColor = customCfg.lineColor || accent;
   const effectiveAreaOpacity = (customCfg.areaOpacity ?? 35) / 100;
 
-  let singleEffectiveColor = baseColor;
-  let chartThresholdValue: number | undefined;
-  let chartThresholdColor: string | undefined;
+  const thresholdLines: Array<{ value: number; color: string }> = [];
 
+  if (options.showThresholdLine) {
+    visibleSeriesInfos.forEach(s => {
+      const nativeThr = getFieldThresholds(s.field);
+      if (nativeThr?.steps && nativeThr.steps.length > 1) {
+        nativeThr.steps.forEach(st => {
+          if (st.value !== null) {
+            if (!thresholdLines.some(l => l.value === st.value && l.color === st.color)) {
+              thresholdLines.push({ value: st.value as number, color: st.color });
+            }
+          }
+        });
+      }
+    });
+  }
+
+  let singleEffectiveColor = baseColor;
   if (visibleSeriesInfos.length === 1) {
     const s = visibleSeriesInfos[0];
     const nativeThr = getFieldThresholds(s.field);
-
-    if (options.showThresholdLine && nativeThr?.steps && nativeThr.steps.length > 1) {
-      const step = nativeThr.steps.find(st => st.value !== null);
-      if (step) {
-        chartThresholdValue = step.value as number;
-        chartThresholdColor = step.color;
-      }
-    }
-
     if (options.useThreshold && !customCfg.lineColor) {
       const last = s.values.length ? s.values[s.values.length - 1] : null;
       if (last !== null) {
@@ -604,8 +654,7 @@ export const SimplePanel: React.FC<Props> = ({
     : null;
 
   const alertDurations = useMemo(() => {
-    const customCfg = (periodSummaryInfos[0]?.field?.config?.custom ?? {}) as Record<string, any>;
-    if (!customCfg.showTimeInAlert || periodSummaryInfos.length !== 1) return [];
+    if (!options.showTimeInAlert || periodSummaryInfos.length !== 1) return [];
     return getAlertDurations(
       periodSummaryInfos[0].values,
       periodSummaryInfos[0].timeValues,
@@ -613,7 +662,7 @@ export const SimplePanel: React.FC<Props> = ({
       tStart,
       tEnd
     );
-  }, [periodSummaryInfos, tStart, tEnd]);
+  }, [options.showTimeInAlert, periodSummaryInfos, tStart, tEnd]);
 
   // ── Auto min/max ────────────────────────────────────────────────────────
   const autoMin = customCfg.axisConfig?.autoMin ?? true;
@@ -636,40 +685,90 @@ export const SimplePanel: React.FC<Props> = ({
     return <PanelDataErrorView fieldConfig={fieldConfig} panelId={id} data={data} needsNumberField />;
   }
 
+  // --- Resolução de Configurações Cascata (Single Serie) ---
+  let singleIcon = 'server';
+  let singleLabel = '';
+  let singleIconStyle = options.iconStyle ?? 'contained';
+  let singleShowIcon = options.showIcon ?? true;
+  let singleShowLabel = options.showLabel ?? true;
+  let singleShowValue = options.showCurrentValue ?? true;
+  let singleShowSummary = options.showSummary ?? true;
+
+  if (allSeriesInfos.length <= 1) {
+    const s = allSeriesInfos[0];
+    if (s) {
+      const custom = (s.field.config.custom as CustomFieldConfig) || {};
+      singleIcon = custom.icon || 'server';
+      singleLabel = custom.label || s.name;
+      singleIconStyle = custom.iconStyle ?? options.iconStyle ?? 'contained';
+      singleShowIcon = custom.showIcon ?? options.showIcon ?? true;
+      singleShowLabel = custom.showLabel ?? options.showLabel ?? true;
+      singleShowValue = custom.showCurrentValue ?? options.showCurrentValue ?? true;
+      singleShowSummary = custom.showSummary ?? options.showSummary ?? true;
+    }
+  }
+
   const tooltipStyle: React.CSSProperties = hover ? { display: 'block', left: (plotX + hover.px + 14), top: (plotY + hover.py + 10), maxWidth: 172 } : { display: 'none' };
   const axisTextColor = theme.isDark ? 'rgba(255,255,255,0.55)' : theme.colors.text.secondary;
   const axisLineColor = theme.isDark ? 'rgba(255,255,255,0.08)' : theme.colors.border.weak;
   const gridLineColor = theme.isDark ? 'rgba(255,255,255,0.07)' : theme.colors.border.weak;
-  const displayValueColor = options.valueFollowsThreshold && options.useThreshold && singleEffectiveColor !== baseColor ? singleEffectiveColor : undefined;
+  const displayValueColor = options.valueFollowsThreshold && options.useThreshold ? displayColor : undefined;
+  const singleHeaderColor = displayValueColor || singleEffectiveColor;
 
   return (
     <div className={cx(styles.card, css`width: ${width}px; height: ${height}px;`)}>
       {/* ── HEADER: Modo single-série (layout original) ── */}
       {allSeriesInfos.length <= 1 && (
         <div ref={headerRef} className={styles.header}>
-          {options.showIcon !== false && (
+          {singleShowIcon && (
             <div 
-              className={options.iconStyle === 'clean' ? styles.iconClean : styles.iconWrap} 
+              className={singleIconStyle === 'clean' ? styles.iconClean : styles.iconWrap} 
               style={
-                displayValueColor 
-                  ? { color: displayValueColor, backgroundColor: options.iconStyle === 'clean' ? 'transparent' : `${displayValueColor}33` } 
+                singleHeaderColor 
+                  ? { 
+                      color: singleHeaderColor, 
+                      backgroundColor: singleIconStyle === 'clean' ? 'transparent' : `color-mix(in srgb, ${singleHeaderColor} 20%, transparent)`,
+                      border: singleIconStyle === 'clean' ? 'none' : `1px solid color-mix(in srgb, ${singleHeaderColor} 30%, transparent)`
+                    } 
                   : undefined
               }
             >
-              <Icon name={resolveIconName(options.icon) as any} size={options.iconStyle === 'clean' ? 'lg' : 'sm'} />
+              <Icon name={resolveIconName(singleIcon) as any} size={singleIconStyle === 'clean' ? 'lg' : 'sm'} />
             </div>
           )}
           <div className={styles.titleInfo}>
-            {options.showLabel !== false && (
-              <div className={styles.label} style={displayValueColor ? { color: displayValueColor } : undefined}>
-                {options.label || (seriesInfos.length > 0 ? seriesInfos[0].name : '')}
+            {singleShowLabel && (
+              <div className={styles.label} style={singleHeaderColor ? { color: singleHeaderColor } : undefined}>
+                {singleLabel}
               </div>
             )}
-            {options.showPeriodSummary && periodSummaryInfos.length === 1 && (
-              <div className={styles.periodSummary}>
-                {options.showPeriodMin && periodMin !== null && <span className={styles.periodStat}>Mínimo {formatFieldValue(periodMin, periodSummaryInfos[0].field, theme).text}</span>}
-                {options.showPeriodAverage && periodAverage !== null && <span className={styles.periodStat}>Média {formatFieldValue(periodAverage, periodSummaryInfos[0].field, theme).text}</span>}
-                {options.showPeriodPeak && periodPeak !== null && <span className={styles.periodStat}>Pico {formatFieldValue(periodPeak, periodSummaryInfos[0].field, theme).text}</span>}
+            {singleShowSummary && periodSummaryInfos.length === 1 && (
+              <div className={styles.periodSummary} style={singleHeaderColor ? { color: singleHeaderColor } : undefined}>
+                {(() => {
+                   const nodes: React.ReactNode[] = [];
+                   if (options.showPeriodMin && periodMin !== null) {
+                     nodes.push(
+                       <span key="min" className={styles.periodStat} style={singleHeaderColor ? { color: singleHeaderColor, opacity: 0.85 } : { opacity: 0.85 }}>
+                         Mínimo {formatFieldValue(periodMin, periodSummaryInfos[0].field, theme).text}
+                       </span>
+                     );
+                   }
+                   if (options.showPeriodAverage && periodAverage !== null) {
+                     nodes.push(
+                       <span key="avg" className={styles.periodStat} style={singleHeaderColor ? { color: singleHeaderColor, opacity: 0.85 } : { opacity: 0.85 }}>
+                         Média {formatFieldValue(periodAverage, periodSummaryInfos[0].field, theme).text}
+                       </span>
+                     );
+                   }
+                   if (options.showPeriodPeak && periodPeak !== null) {
+                     nodes.push(
+                       <span key="max" className={styles.periodStat} style={singleHeaderColor ? { color: singleHeaderColor, opacity: 0.85 } : { opacity: 0.85 }}>
+                         Pico {formatFieldValue(periodPeak, periodSummaryInfos[0].field, theme).text}
+                       </span>
+                     );
+                   }
+                   return nodes;
+                })()}
                 {alertDurations.map((alert) => (
                   <span key={alert.value} className={styles.periodStat} style={{ color: alert.color }}>
                     ≥ {formatFieldValue(alert.value, periodSummaryInfos[0].field, theme).text}: {humanDuration(alert.durationMs, 'ms')}
@@ -679,7 +778,7 @@ export const SimplePanel: React.FC<Props> = ({
             )}
           </div>
 
-          {!hasMultipleSeries && options.showValue !== false && (
+          {!hasMultipleSeries && singleShowValue && (
             <span className={styles.value} style={displayValueColor ? { color: displayValueColor } : undefined}>
               {displayValue ?? '—'}
             </span>
@@ -691,10 +790,26 @@ export const SimplePanel: React.FC<Props> = ({
       {allSeriesInfos.length >= 2 && (
         <div ref={headerRef} className={styles.multiGrid}>
           {allSeriesInfos.map((s, idx) => {
+            const custom = (s.field.config.custom as CustomFieldConfig) || {};
+            
+            // Conteúdo
+            const serieIcon = custom.icon || 'server';
+            const serieLabel = custom.label || s.name;
+            
+            // Estilo e Visibilidade em Cascata
+            const isIconVisible = custom.showIcon ?? options.showIcon ?? true;
+            const isLabelVisible = custom.showLabel ?? options.showLabel ?? true;
+            const isValueVisible = custom.showCurrentValue ?? options.showCurrentValue ?? true;
+            const isSummaryVisible = custom.showSummary ?? options.showSummary ?? true;
+            const currentIconStyle = custom.iconStyle ?? options.iconStyle ?? 'contained';
+            const currentFontSize = custom.valueFontSize || options.valueFontSize || '18px';
+
             const isSelected = selectedSeriesIndex === idx;
             const isDimmed = selectedSeriesIndex !== null && !isSelected;
             const lastVal = s.values.length ? s.values[s.values.length - 1] : null;
-            const formattedVal = lastVal !== null ? formatFieldValue(lastVal, s.field, theme).text : '—';
+            const formattedValObj = lastVal !== null ? formatFieldValue(lastVal, s.field, theme) : null;
+            const formattedVal = formattedValObj ? formattedValObj.text : '—';
+            const valueColor = options.useThreshold && options.valueFollowsThreshold && formattedValObj?.color ? formattedValObj.color : undefined;
             const seriesColor = getSeriesColor(s);
 
             // Resumo do período para este card
@@ -703,17 +818,48 @@ export const SimplePanel: React.FC<Props> = ({
             const cardAvg = validVals.length ? validVals.reduce((a, b) => a + b, 0) / validVals.length : null;
             const cardMax = validVals.length ? Math.max(...validVals) : null;
 
-            // Montar texto de resumo compacto
-            const summaryParts: string[] = [];
-            if (options.showPeriodSummary) {
+            const minAlert = cardMin !== null ? getThresholdAlert(cardMin, s.field, theme) : null;
+            const avgAlert = cardAvg !== null ? getThresholdAlert(cardAvg, s.field, theme) : null;
+            const maxAlert = cardMax !== null ? getThresholdAlert(cardMax, s.field, theme) : null;
+
+            const minFormatted = cardMin !== null ? formatFieldValue(cardMin, s.field, theme).text : '';
+            const avgFormatted = cardAvg !== null ? formatFieldValue(cardAvg, s.field, theme).text : '';
+            const maxFormatted = cardMax !== null ? formatFieldValue(cardMax, s.field, theme).text : '';
+
+            const cardAlertDurations = (isSummaryVisible && options.showTimeInAlert) ? getAlertDurations(s.values, s.timeValues, getFieldThresholds(s.field), tStart, tEnd) : [];
+
+            // Montar nós de resumo compactos com badge condicional
+            const summaryNodes: React.ReactNode[] = [];
+            if (isSummaryVisible) {
               if (options.showPeriodMin && cardMin !== null) {
-                summaryParts.push(`Min ${formatFieldValue(cardMin, s.field, theme).text}`);
+                summaryNodes.push(
+                  <span key="min" style={{ color: seriesColor, opacity: 0.85 }}>
+                    Min {minFormatted}
+                  </span>
+                );
               }
               if (options.showPeriodAverage && cardAvg !== null) {
-                summaryParts.push(`Méd ${formatFieldValue(cardAvg, s.field, theme).text}`);
+                summaryNodes.push(
+                  <span key="avg" style={{ color: seriesColor, opacity: 0.85 }}>
+                    Méd {avgFormatted}
+                  </span>
+                );
               }
               if (options.showPeriodPeak && cardMax !== null) {
-                summaryParts.push(`Max ${formatFieldValue(cardMax, s.field, theme).text}`);
+                summaryNodes.push(
+                  <span key="max" style={{ color: seriesColor, opacity: 0.85 }}>
+                    Max {maxFormatted}
+                  </span>
+                );
+              }
+              if (options.showTimeInAlert && cardAlertDurations.length > 0) {
+                cardAlertDurations.forEach(alert => {
+                  summaryNodes.push(
+                    <span key={`alert-${alert.value}`} style={{ color: alert.color, fontWeight: 600 }}>
+                      ≥ {formatFieldValue(alert.value, s.field, theme).text}: {humanDuration(alert.durationMs, 'ms')}
+                    </span>
+                  );
+                });
               }
             }
 
@@ -722,27 +868,38 @@ export const SimplePanel: React.FC<Props> = ({
                 key={s.name}
                 className={cx(styles.multiCard, isSelected && styles.multiCardSelected)}
                 style={{ 
+                  '--card-color': seriesColor,
                   opacity: isDimmed ? 0.35 : 1,
-                  ...(isSelected ? { borderColor: seriesColor } : {})
-                }}
+                } as React.CSSProperties}
                 onClick={() => handleCardClick(idx)}
               >
                 <div className={styles.multiCardLeft}>
-                  <div className={styles.multiCardIcon} style={{ color: seriesColor }}>
-                    <Icon name={resolveIconName(options.icon) as any} size="lg" />
-                  </div>
+                  {isIconVisible && (
+                    <div className={currentIconStyle === 'clean' ? styles.multiCardIconClean : styles.multiCardIcon}>
+                      <Icon name={resolveIconName(serieIcon) as any} size={currentIconStyle === 'clean' ? 'lg' : 'sm'} />
+                    </div>
+                  )}
                   <div className={styles.multiCardTextCol}>
-                    <span className={styles.multiCardLabel}>{s.name}</span>
-                    {summaryParts.length > 0 && (
-                      <span className={styles.multiCardSummary}>
-                        {summaryParts.join(' · ')}
-                      </span>
+                    {isLabelVisible && (
+                      <span className={styles.multiCardLabel} style={{ color: seriesColor }}>{serieLabel}</span>
+                    )}
+                    {summaryNodes.length > 0 && (
+                      <div className={styles.multiCardSummary} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px', color: seriesColor }}>
+                        {summaryNodes.map((node, i) => (
+                          <React.Fragment key={i}>
+                            {node}
+                            {i < summaryNodes.length - 1 && <span style={{ color: seriesColor, opacity: 0.5 }}>·</span>}
+                          </React.Fragment>
+                        ))}
+                      </div>
                     )}
                   </div>
                 </div>
-                <div className={styles.multiCardValue}>
-                  {formattedVal}
-                </div>
+                {isValueVisible && (
+                  <div className={styles.multiCardValue} style={{ fontSize: currentFontSize, color: valueColor }}>
+                    {formattedVal}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -788,8 +945,7 @@ export const SimplePanel: React.FC<Props> = ({
               theme={theme}
               thresholdMode={options.thresholdMode || 'line'}
               useThreshold={options.useThreshold || false}
-              thresholdValue={chartThresholdValue}
-              thresholdColor={chartThresholdColor}
+              thresholdLines={thresholdLines}
               getSeriesColor={getSeriesColor}
               axisTextColor={axisTextColor}
               axisLineColor={axisLineColor}

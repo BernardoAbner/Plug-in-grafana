@@ -12,17 +12,18 @@ const getTooltipStyles = (theme: any) => ({
     left: 0;
     pointer-events: none;
     z-index: 100;
-    background: ${theme.isDark ? 'rgba(17,24,39,0.96)' : 'rgba(255,255,255,0.97)'};
-    border: 1px solid ${theme.isDark ? 'rgba(255,255,255,0.12)' : theme.colors.border.weak};
+    background: rgba(15, 17, 23, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 6px;
     padding: 8px 12px;
     min-width: 140px;
     backdrop-filter: blur(8px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   `,
   marker: css`
     position: absolute;
-    width: 10px;
-    height: 10px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
     transform: translate(-50%, -50%);
     pointer-events: none;
@@ -98,8 +99,7 @@ export interface UplotChartProps {
   theme: any;
   thresholdMode: ThresholdMode;
   useThreshold: boolean;
-  thresholdValue?: number;
-  thresholdColor?: string;
+  thresholdLines?: Array<{ value: number; color: string }>;
   getSeriesColor: (s: any) => string;
   axisTextColor: string;
   axisLineColor: string;
@@ -113,7 +113,7 @@ export interface UplotChartProps {
 export const UplotChart: React.FC<UplotChartProps> = ({
   width, height, seriesInfos, times, timeRange, chartType, lineInterpolation, linePattern,
   lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis,
-  yLo, yHi, theme, thresholdMode, useThreshold, thresholdValue, thresholdColor, getSeriesColor,
+  yLo, yHi, theme, thresholdMode, useThreshold, thresholdLines, getSeriesColor,
   axisTextColor, axisLineColor, gridLineColor, selectedSeriesIndex, onHover, onClickTimeRange, onDoubleClick
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -278,27 +278,29 @@ export const UplotChart: React.FC<UplotChartProps> = ({
       hooks: {
         draw: [
           (u) => {
-            if (thresholdValue === undefined || thresholdValue === null) return;
+            if (!thresholdLines || thresholdLines.length === 0) return;
             
             const { ctx } = u;
-            // Converter o valor do threshold para a coordenada vertical (pixels)
-            const cy = u.valToPos(thresholdValue, 'y', true);
-
-            // Proteção: Só desenhar se a linha estiver dentro da área visível do gráfico
-            if (cy < u.bbox.top || cy > u.bbox.top + u.bbox.height) return;
-
-            // Desenhar a linha pontilhada
             ctx.save();
-            ctx.beginPath();
-            // Usar a cor configurada ou um fallback elegante (ex: vermelho translúcido)
-            ctx.strokeStyle = thresholdColor || 'rgba(255, 60, 60, 0.6)';
-            ctx.lineWidth = 1.5;
-            ctx.setLineDash([5, 5]); // Estilo tracejado premium
-            
-            // Traçar a linha de ponta a ponta na área do gráfico
-            ctx.moveTo(u.bbox.left, cy);
-            ctx.lineTo(u.bbox.left + u.bbox.width, cy);
-            ctx.stroke();
+            thresholdLines.forEach((line) => {
+              // Converter o valor do threshold para a coordenada vertical (pixels)
+              const cy = u.valToPos(line.value, 'y', true);
+
+              // Proteção: Só desenhar se a linha estiver dentro da área visível do gráfico
+              if (cy < u.bbox.top || cy > u.bbox.top + u.bbox.height) return;
+
+              // Desenhar a linha pontilhada
+              ctx.beginPath();
+              // Usar a cor configurada ou um fallback elegante (ex: vermelho translúcido)
+              ctx.strokeStyle = line.color || 'rgba(255, 60, 60, 0.6)';
+              ctx.lineWidth = 1.5;
+              ctx.setLineDash([5, 5]); // Estilo tracejado premium
+              
+              // Traçar a linha de ponta a ponta na área do gráfico
+              ctx.moveTo(u.bbox.left, cy);
+              ctx.lineTo(u.bbox.left + u.bbox.width, cy);
+              ctx.stroke();
+            });
             ctx.restore();
           }
         ],
@@ -335,6 +337,8 @@ export const UplotChart: React.FC<UplotChartProps> = ({
             const rowsEl = el.querySelector('.tooltipRows');
             if (rowsEl) {
               rowsEl.innerHTML = '';
+              const activeMetrics: Array<{ rawValue: number | null, name: string, formatted: string, color: string }> = [];
+
               seriesInfos.forEach((s, idxSeries) => {
                 if (selectedSeriesIndex !== null && selectedSeriesIndex !== idxSeries) return;
 
@@ -344,22 +348,39 @@ export const UplotChart: React.FC<UplotChartProps> = ({
                 const formatted = display.text + (display.suffix ? display.suffix : '');
                 const color = getSeriesColor(s);
 
+                activeMetrics.push({
+                  rawValue: val,
+                  name: s.name,
+                  formatted,
+                  color
+                });
+              });
+
+              if (selectedSeriesIndex === null) {
+                activeMetrics.sort((a, b) => {
+                  const valA = a.rawValue ?? -Infinity;
+                  const valB = b.rawValue ?? -Infinity;
+                  return valB - valA;
+                });
+              }
+
+              activeMetrics.forEach(metric => {
                 const row = document.createElement('div');
                 row.className = tooltipStyles.row;
 
                 const dot = document.createElement('span');
                 dot.className = tooltipStyles.dot;
-                dot.style.backgroundColor = color;
+                dot.style.backgroundColor = metric.color;
                 row.appendChild(dot);
 
                 const label = document.createElement('span');
                 label.className = tooltipStyles.label;
-                label.textContent = s.name;
+                label.textContent = metric.name;
                 row.appendChild(label);
 
                 const valEl = document.createElement('span');
                 valEl.className = tooltipStyles.value;
-                valEl.textContent = formatted;
+                valEl.textContent = metric.formatted;
                 row.appendChild(valEl);
 
                 rowsEl.appendChild(row);
@@ -407,22 +428,40 @@ export const UplotChart: React.FC<UplotChartProps> = ({
               const tooltipWidth  = el.offsetWidth  || 200;
               const tooltipHeight = el.offsetHeight || 80;
 
-              // 2. Lógica de Flip no eixo Y (Baixo → Cima)
-              // u.bbox usa pixels físicos; cx/cy já estão em px CSS (valToPos retorna CSS px)
-              const offsetY = (cy + tooltipHeight + 15 > u.bbox.height / window.devicePixelRatio)
-                ? -(tooltipHeight + 15)  // Inverte: tooltip vai para CIMA da bolinha
-                : 15;                    // Padrão: tooltip vai para BAIXO da bolinha
+              const chartLeft = u.bbox.left / window.devicePixelRatio;
+              const chartTop = u.bbox.top / window.devicePixelRatio;
+              const chartWidth = u.bbox.width / window.devicePixelRatio;
+              const chartHeight = u.bbox.height / window.devicePixelRatio;
 
-              // 3. Lógica de Flip no eixo X (Direita → Esquerda)
-              const offsetX = (cx + tooltipWidth + 15 > u.bbox.width / window.devicePixelRatio)
-                ? -(tooltipWidth + 15)   // Inverte: tooltip vai para a ESQUERDA da bolinha
-                : 15;                    // Padrão: tooltip vai para a DIREITA da bolinha
+              const cursorY = cy + chartTop;
+              const cursorX = cx + chartLeft;
 
-              // 4. Coordenadas finais absolutas (relativas ao container do gráfico)
-              const finalTop  = cy + u.bbox.top  / window.devicePixelRatio + offsetY;
-              const finalLeft = cx + u.bbox.left / window.devicePixelRatio + offsetX;
+              // 2. Lógica Anti-Sobreposição (Jogar para o lado)
+              let calculatedTop: number;
+              if (cursorY < tooltipHeight + 20) {
+                // Se não houver espaço em cima, alinha o centro do tooltip com o cursor (joga "para o lado")
+                calculatedTop = cursorY - tooltipHeight / 2;
+              } else {
+                // Padrão: posiciona o tooltip ACIMA da bolinha
+                calculatedTop = cursorY - tooltipHeight - 12;
+              }
 
-              el.style.transform = `translate(${finalLeft}px, ${finalTop}px)`;
+              // Trava de segurança no topo: nunca sobe mais do que o início útil do gráfico
+              let safeTop = Math.max(chartTop + 8, calculatedTop);
+
+              // Trava de segurança na base: se for cortar embaixo, joga o tooltip para cima
+              if (safeTop + tooltipHeight > chartTop + chartHeight) {
+                safeTop = chartTop + chartHeight - tooltipHeight - 8;
+              }
+
+              // 3. Lógica de Inversão Horizontal (Direita -> Esquerda)
+              let calculatedLeft = cursorX + 15;
+              if (calculatedLeft + tooltipWidth > chartLeft + chartWidth) {
+                 calculatedLeft = cursorX - tooltipWidth - 15;
+              }
+              const safeLeft = Math.max(chartLeft + 8, calculatedLeft);
+
+              el.style.transform = `translate(${safeLeft}px, ${safeTop}px)`;
             } else {
               el.style.display = 'none';
             }
@@ -460,7 +499,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
         uplotRef.current = null;
       }
     };
-  }, [width, height, times, timeRange, seriesInfos, chartType, lineInterpolation, linePattern, lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis, yLo, yHi, theme, thresholdMode, useThreshold, thresholdValue, thresholdColor, getSeriesColor, axisTextColor, axisLineColor, gridLineColor]);
+  }, [width, height, times, timeRange, seriesInfos, chartType, lineInterpolation, linePattern, lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis, yLo, yHi, theme, thresholdMode, useThreshold, thresholdLines, getSeriesColor, axisTextColor, axisLineColor, gridLineColor]);
 
   // Update size without recreating instance if only dimensions change
   useEffect(() => {

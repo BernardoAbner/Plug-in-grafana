@@ -172,44 +172,50 @@ export interface CustomFieldConfig {
   nativeThresholds: NativeThresholdsConfig;
   // Mapeamentos de valor (sistema completo)
   valueMappings: AnyMapping[];
+  // Específicos da métrica (Overrides)
+  icon?: string;
+  label?: string;
+  iconStyle?: 'contained' | 'clean';
+  showIcon?: boolean;
+  showLabel?: boolean;
+  showCurrentValue?: boolean;
+  showSummary?: boolean;
+  valueFontSize?: string;
   // Gráfico
   chartType: ChartType;
   lineColor: string;
   areaOpacity: number;            // 0–100, convertido para 0–1 na renderização
-  showYAxis: boolean;
-  lineInterpolation: LineInterpolation;
   linePattern: LinePattern;
   lineGradient: LineGradient;
   lineWidth: number;
   showPoints: boolean;
   pointSize: number;
-  showGrid: boolean;
-  showXAxis: boolean;
   barWidth: number;
   barMode: BarMode;
   showThresholdBands: boolean;
-  showTimeInAlert: boolean;
 }
 
 /** Opções de painel — aparecem na seção "Panel options" da sidebar */
 export interface SimpleOptions {
-  label: string;
-  icon: string;
   iconStyle: 'contained' | 'clean';
   theme: CardTheme;
   showSparkline: boolean;
   showLegend: boolean;
-  valueFontSize: number;
+  showGrid: boolean;
+  showXAxis: boolean;
+  showYAxis: boolean;
+  valueFontSize: string;
   useThreshold: boolean;
   showThresholdLine: boolean;
   thresholdMode: ThresholdMode;
   // Toggles de visibilidade do cabeçalho
   showIcon: boolean;
   showLabel: boolean;
-  showValue: boolean;
+  showCurrentValue: boolean;
+  showSummary: boolean;
+  showTimeInAlert: boolean;
   // Cor do valor acompanha threshold
   valueFollowsThreshold: boolean;
-  showPeriodSummary: boolean;
   showPeriodPeak: boolean;
   showPeriodMin: boolean;
   showPeriodAverage: boolean;
