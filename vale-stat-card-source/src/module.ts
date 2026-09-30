@@ -169,6 +169,30 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
               { value: 'clean', label: 'Livre' },
             ],
           },
+        })
+        .addBooleanSwitch({
+          path: 'colorIconByThreshold',
+          name: 'Usar cor do threshold no Ícone',
+          defaultValue: false,
+          category: ['Cabeçalho'],
+        })
+        .addBooleanSwitch({
+          path: 'colorLabelByThreshold',
+          name: 'Usar cor do threshold no Rótulo',
+          defaultValue: false,
+          category: ['Cabeçalho'],
+        })
+        .addBooleanSwitch({
+          path: 'colorValueByThreshold',
+          name: 'Usar cor do threshold na Métrica (Valor)',
+          defaultValue: false,
+          category: ['Cabeçalho'],
+        })
+        .addBooleanSwitch({
+          path: 'colorSummaryByThreshold',
+          name: 'Usar cor do threshold no Resumo (Mín/Méd/Máx)',
+          defaultValue: false,
+          category: ['Cabeçalho'],
         });
     },
   })

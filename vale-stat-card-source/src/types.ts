@@ -181,6 +181,10 @@ export interface CustomFieldConfig {
   showCurrentValue?: boolean;
   showSummary?: boolean;
   valueFontSize?: string;
+  colorIconByThreshold?: boolean;
+  colorLabelByThreshold?: boolean;
+  colorValueByThreshold?: boolean;
+  colorSummaryByThreshold?: boolean;
   // Gráfico
   chartType: ChartType;
   lineColor: string;

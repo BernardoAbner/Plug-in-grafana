@@ -42,7 +42,7 @@ function resolveIconName(icon: string): string {
 
 // ─── Paleta de temas ───────────────────────────────────────────────────────
 export const THEME_COLORS: Record<CardTheme, { accent: string; glow: string }> = {
-  vale: { accent: '#007E7A', glow: 'rgba(0, 126, 122, 0.25)' },
+  vale: { accent: '#00B59B', glow: 'rgba(0, 181, 155, 0.25)' },
   teal: { accent: '#2dd4bf', glow: 'rgba(45, 212, 191, 0.25)' },
   blue: { accent: '#38bdf8', glow: 'rgba(56, 189, 248, 0.25)' },
   purple: { accent: '#a78bfa', glow: 'rgba(167, 139, 250, 0.25)' },
@@ -241,9 +241,6 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string |
       width: 26px;
       height: 26px;
       border-radius: 8px;
-      background: color-mix(in srgb, ${accent} 20%, transparent);
-      border: 1px solid color-mix(in srgb, ${accent} 30%, transparent);
-      color: ${accent};
       flex-shrink: 0;
       svg { width: 14px; height: 14px; }
     `,
@@ -251,7 +248,6 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string |
       display: flex;
       align-items: center;
       justify-content: center;
-      color: ${accent};
       flex-shrink: 0;
       svg { width: 18px; height: 18px; }
     `,
@@ -267,7 +263,6 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string |
       font-size: ${theme.typography.bodySmall.fontSize};
       letter-spacing: 0.06em;
       text-transform: uppercase;
-      color: ${labelColor};
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -277,7 +272,6 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string |
     value: css`
       font-size: ${typeof valueFontSize === 'number' ? valueFontSize + 'px' : valueFontSize};
       font-weight: ${theme.typography.fontWeightBold};
-      color: ${valueTextColor};
       line-height: 1;
       margin-left: ${theme.spacing(1)};
       flex-shrink: 0;
@@ -289,7 +283,6 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string |
       flex-wrap: wrap;
       gap: ${theme.spacing(0.5)} ${theme.spacing(1.5)};
       font-size: 11px;
-      color: ${tooltipSub};
     `,
     periodStat: css`
       white-space: nowrap;
@@ -444,9 +437,6 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string |
       width: 30px;
       height: 30px;
       border-radius: 6px;
-      background: color-mix(in srgb, var(--card-color) 20%, transparent);
-      border: 1px solid color-mix(in srgb, var(--card-color) 30%, transparent);
-      color: var(--card-color);
       flex-shrink: 0;
       svg { width: 14px; height: 14px; }
     `,
@@ -454,7 +444,6 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string |
       display: flex;
       align-items: center;
       justify-content: center;
-      color: var(--card-color);
       flex-shrink: 0;
       svg { width: 18px; height: 18px; }
     `,
@@ -468,7 +457,6 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string |
       font-size: 11px;
       font-weight: 600;
       text-transform: uppercase;
-      color: var(--card-color);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -476,19 +464,21 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string |
     multiCardValue: css`
       font-size: 18px;
       font-weight: 700;
-      color: #FFFFFF;
       white-space: nowrap;
       flex-shrink: 0;
     `,
     multiCardSummary: css`
       font-size: 10px;
-      color: #9CA3AF;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
       font-variant-numeric: tabular-nums;
     `,
   };
+};
+
+const resolveColor = (useThreshold: boolean, currentThresholdColor: string | undefined, baseColor: string) => {
+  return (useThreshold && currentThresholdColor) ? currentThresholdColor : baseColor;
 };
 
 // ─── Componente principal ──────────────────────────────────────────────────
@@ -584,7 +574,11 @@ export const SimplePanel: React.FC<Props> = ({
   const lineWidth = customCfg.lineWidth ?? 2;
   const showPoints = customCfg.showPoints ?? false;
   const pointSize = customCfg.pointSize ?? 3;
-  const baseColor = customCfg.lineColor || accent;
+  
+  // Use the color of the first visible series, which includes native fixedColor overrides
+  const firstSeriesColor = visibleSeriesInfos.length > 0 ? visibleSeriesInfos[0].color : accent;
+  const baseColor = customCfg.lineColor || firstSeriesColor;
+  
   const effectiveAreaOpacity = (customCfg.areaOpacity ?? 35) / 100;
 
   const thresholdLines: Array<{ value: number; color: string }> = [];
@@ -694,6 +688,12 @@ export const SimplePanel: React.FC<Props> = ({
   let singleShowValue = options.showCurrentValue ?? true;
   let singleShowSummary = options.showSummary ?? true;
 
+  // Novos Toggles Independentes
+  let colorIconByThreshold = false;
+  let colorLabelByThreshold = false;
+  let colorValueByThreshold = false;
+  let colorSummaryByThreshold = false;
+
   if (allSeriesInfos.length <= 1) {
     const s = allSeriesInfos[0];
     if (s) {
@@ -705,6 +705,11 @@ export const SimplePanel: React.FC<Props> = ({
       singleShowLabel = custom.showLabel ?? options.showLabel ?? true;
       singleShowValue = custom.showCurrentValue ?? options.showCurrentValue ?? true;
       singleShowSummary = custom.showSummary ?? options.showSummary ?? true;
+
+      colorIconByThreshold = custom.colorIconByThreshold ?? false;
+      colorLabelByThreshold = custom.colorLabelByThreshold ?? false;
+      colorValueByThreshold = custom.colorValueByThreshold ?? false;
+      colorSummaryByThreshold = custom.colorSummaryByThreshold ?? false;
     }
   }
 
@@ -712,8 +717,14 @@ export const SimplePanel: React.FC<Props> = ({
   const axisTextColor = theme.isDark ? 'rgba(255,255,255,0.55)' : theme.colors.text.secondary;
   const axisLineColor = theme.isDark ? 'rgba(255,255,255,0.08)' : theme.colors.border.weak;
   const gridLineColor = theme.isDark ? 'rgba(255,255,255,0.07)' : theme.colors.border.weak;
-  const displayValueColor = options.valueFollowsThreshold && options.useThreshold ? displayColor : undefined;
-  const singleHeaderColor = displayValueColor || singleEffectiveColor;
+  
+  // A cor ativa do threshold calculada para o single view
+  const activeThresholdColorSingle = displayColor || singleEffectiveColor; 
+
+  const iconColor = resolveColor(colorIconByThreshold, activeThresholdColorSingle, '#00B59B');
+  const labelColor = resolveColor(colorLabelByThreshold, activeThresholdColorSingle, '#00B59B');
+  const valueColor = resolveColor(colorValueByThreshold, activeThresholdColorSingle, '#FFFFFF');
+  const summaryColor = resolveColor(colorSummaryByThreshold, activeThresholdColorSingle, '#00B59B');
 
   return (
     <div className={cx(styles.card, css`width: ${width}px; height: ${height}px;`)}>
@@ -723,46 +734,42 @@ export const SimplePanel: React.FC<Props> = ({
           {singleShowIcon && (
             <div 
               className={singleIconStyle === 'clean' ? styles.iconClean : styles.iconWrap} 
-              style={
-                singleHeaderColor 
-                  ? { 
-                      color: singleHeaderColor, 
-                      backgroundColor: singleIconStyle === 'clean' ? 'transparent' : `color-mix(in srgb, ${singleHeaderColor} 20%, transparent)`,
-                      border: singleIconStyle === 'clean' ? 'none' : `1px solid color-mix(in srgb, ${singleHeaderColor} 30%, transparent)`
-                    } 
-                  : undefined
-              }
+              style={{ 
+                color: iconColor, 
+                backgroundColor: singleIconStyle === 'clean' ? 'transparent' : `color-mix(in srgb, ${iconColor} 20%, transparent)`,
+                border: singleIconStyle === 'clean' ? 'none' : `1px solid color-mix(in srgb, ${iconColor} 30%, transparent)`
+              }}
             >
               <Icon name={resolveIconName(singleIcon) as any} size={singleIconStyle === 'clean' ? 'lg' : 'sm'} />
             </div>
           )}
           <div className={styles.titleInfo}>
             {singleShowLabel && (
-              <div className={styles.label} style={singleHeaderColor ? { color: singleHeaderColor } : undefined}>
+              <div className={styles.label} style={{ color: labelColor }}>
                 {singleLabel}
               </div>
             )}
             {singleShowSummary && periodSummaryInfos.length === 1 && (
-              <div className={styles.periodSummary} style={singleHeaderColor ? { color: singleHeaderColor } : undefined}>
+              <div className={styles.periodSummary} style={{ color: summaryColor }}>
                 {(() => {
                    const nodes: React.ReactNode[] = [];
                    if (options.showPeriodMin && periodMin !== null) {
                      nodes.push(
-                       <span key="min" className={styles.periodStat} style={singleHeaderColor ? { color: singleHeaderColor, opacity: 0.85 } : { opacity: 0.85 }}>
+                       <span key="min" className={styles.periodStat} style={{ opacity: 0.8 }}>
                          Mínimo {formatFieldValue(periodMin, periodSummaryInfos[0].field, theme).text}
                        </span>
                      );
                    }
                    if (options.showPeriodAverage && periodAverage !== null) {
                      nodes.push(
-                       <span key="avg" className={styles.periodStat} style={singleHeaderColor ? { color: singleHeaderColor, opacity: 0.85 } : { opacity: 0.85 }}>
+                       <span key="avg" className={styles.periodStat} style={{ opacity: 0.8 }}>
                          Média {formatFieldValue(periodAverage, periodSummaryInfos[0].field, theme).text}
                        </span>
                      );
                    }
                    if (options.showPeriodPeak && periodPeak !== null) {
                      nodes.push(
-                       <span key="max" className={styles.periodStat} style={singleHeaderColor ? { color: singleHeaderColor, opacity: 0.85 } : { opacity: 0.85 }}>
+                       <span key="max" className={styles.periodStat} style={{ opacity: 0.8 }}>
                          Pico {formatFieldValue(periodPeak, periodSummaryInfos[0].field, theme).text}
                        </span>
                      );
@@ -770,7 +777,7 @@ export const SimplePanel: React.FC<Props> = ({
                    return nodes;
                 })()}
                 {alertDurations.map((alert) => (
-                  <span key={alert.value} className={styles.periodStat} style={{ color: alert.color }}>
+                  <span key={alert.value} className={styles.periodStat} style={{ color: alert.color, opacity: 0.8 }}>
                     ≥ {formatFieldValue(alert.value, periodSummaryInfos[0].field, theme).text}: {humanDuration(alert.durationMs, 'ms')}
                   </span>
                 ))}
@@ -779,7 +786,7 @@ export const SimplePanel: React.FC<Props> = ({
           </div>
 
           {!hasMultipleSeries && singleShowValue && (
-            <span className={styles.value} style={displayValueColor ? { color: displayValueColor } : undefined}>
+            <span className={styles.value} style={{ color: valueColor }}>
               {displayValue ?? '—'}
             </span>
           )}
@@ -804,13 +811,26 @@ export const SimplePanel: React.FC<Props> = ({
             const currentIconStyle = custom.iconStyle ?? options.iconStyle ?? 'contained';
             const currentFontSize = custom.valueFontSize || options.valueFontSize || '18px';
 
+            const colorIconByThreshold = custom.colorIconByThreshold ?? false;
+            const colorLabelByThreshold = custom.colorLabelByThreshold ?? false;
+            const colorValueByThreshold = custom.colorValueByThreshold ?? false;
+            const colorSummaryByThreshold = custom.colorSummaryByThreshold ?? false;
+
             const isSelected = selectedSeriesIndex === idx;
             const isDimmed = selectedSeriesIndex !== null && !isSelected;
             const lastVal = s.values.length ? s.values[s.values.length - 1] : null;
             const formattedValObj = lastVal !== null ? formatFieldValue(lastVal, s.field, theme) : null;
             const formattedVal = formattedValObj ? formattedValObj.text : '—';
-            const valueColor = options.useThreshold && options.valueFollowsThreshold && formattedValObj?.color ? formattedValObj.color : undefined;
-            const seriesColor = getSeriesColor(s);
+            
+            // Calculate active threshold color
+            const thr = getFieldThresholds(s.field);
+            const step = getActiveNativeThreshold(lastVal ?? -Infinity, thr);
+            const activeThrColor = step?.color;
+
+            const multiIconColor = resolveColor(colorIconByThreshold, activeThrColor, '#00B59B');
+            const multiLabelColor = resolveColor(colorLabelByThreshold, activeThrColor, '#00B59B');
+            const multiValueColor = resolveColor(colorValueByThreshold, activeThrColor, '#FFFFFF');
+            const multiSummaryColor = resolveColor(colorSummaryByThreshold, activeThrColor, '#00B59B');
 
             // Resumo do período para este card
             const validVals = s.values.filter((v) => v !== null && !isNaN(v));
@@ -833,21 +853,21 @@ export const SimplePanel: React.FC<Props> = ({
             if (isSummaryVisible) {
               if (options.showPeriodMin && cardMin !== null) {
                 summaryNodes.push(
-                  <span key="min" style={{ color: seriesColor, opacity: 0.85 }}>
+                  <span key="min" style={{ color: multiSummaryColor, opacity: 0.8 }}>
                     Min {minFormatted}
                   </span>
                 );
               }
               if (options.showPeriodAverage && cardAvg !== null) {
                 summaryNodes.push(
-                  <span key="avg" style={{ color: seriesColor, opacity: 0.85 }}>
+                  <span key="avg" style={{ color: multiSummaryColor, opacity: 0.8 }}>
                     Méd {avgFormatted}
                   </span>
                 );
               }
               if (options.showPeriodPeak && cardMax !== null) {
                 summaryNodes.push(
-                  <span key="max" style={{ color: seriesColor, opacity: 0.85 }}>
+                  <span key="max" style={{ color: multiSummaryColor, opacity: 0.8 }}>
                     Max {maxFormatted}
                   </span>
                 );
@@ -855,7 +875,7 @@ export const SimplePanel: React.FC<Props> = ({
               if (options.showTimeInAlert && cardAlertDurations.length > 0) {
                 cardAlertDurations.forEach(alert => {
                   summaryNodes.push(
-                    <span key={`alert-${alert.value}`} style={{ color: alert.color, fontWeight: 600 }}>
+                    <span key={`alert-${alert.value}`} style={{ color: alert.color, fontWeight: 600, opacity: 0.8 }}>
                       ≥ {formatFieldValue(alert.value, s.field, theme).text}: {humanDuration(alert.durationMs, 'ms')}
                     </span>
                   );
@@ -868,27 +888,33 @@ export const SimplePanel: React.FC<Props> = ({
                 key={s.name}
                 className={cx(styles.multiCard, isSelected && styles.multiCardSelected)}
                 style={{ 
-                  '--card-color': seriesColor,
                   opacity: isDimmed ? 0.35 : 1,
                 } as React.CSSProperties}
                 onClick={() => handleCardClick(idx)}
               >
                 <div className={styles.multiCardLeft}>
                   {isIconVisible && (
-                    <div className={currentIconStyle === 'clean' ? styles.multiCardIconClean : styles.multiCardIcon}>
+                    <div 
+                      className={currentIconStyle === 'clean' ? styles.multiCardIconClean : styles.multiCardIcon}
+                      style={{ 
+                        color: multiIconColor, 
+                        backgroundColor: currentIconStyle === 'clean' ? 'transparent' : `color-mix(in srgb, ${multiIconColor} 20%, transparent)`,
+                        border: currentIconStyle === 'clean' ? 'none' : `1px solid color-mix(in srgb, ${multiIconColor} 30%, transparent)`
+                      }}
+                    >
                       <Icon name={resolveIconName(serieIcon) as any} size={currentIconStyle === 'clean' ? 'lg' : 'sm'} />
                     </div>
                   )}
                   <div className={styles.multiCardTextCol}>
                     {isLabelVisible && (
-                      <span className={styles.multiCardLabel} style={{ color: seriesColor }}>{serieLabel}</span>
+                      <span className={styles.multiCardLabel} style={{ color: multiLabelColor }}>{serieLabel}</span>
                     )}
                     {summaryNodes.length > 0 && (
-                      <div className={styles.multiCardSummary} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px', color: seriesColor }}>
+                      <div className={styles.multiCardSummary} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px' }}>
                         {summaryNodes.map((node, i) => (
                           <React.Fragment key={i}>
                             {node}
-                            {i < summaryNodes.length - 1 && <span style={{ color: seriesColor, opacity: 0.5 }}>·</span>}
+                            {i < summaryNodes.length - 1 && <span style={{ color: multiSummaryColor, opacity: 0.5 }}>·</span>}
                           </React.Fragment>
                         ))}
                       </div>
@@ -896,7 +922,7 @@ export const SimplePanel: React.FC<Props> = ({
                   </div>
                 </div>
                 {isValueVisible && (
-                  <div className={styles.multiCardValue} style={{ fontSize: currentFontSize, color: valueColor }}>
+                  <div className={styles.multiCardValue} style={{ fontSize: currentFontSize, color: multiValueColor }}>
                     {formattedVal}
                   </div>
                 )}
