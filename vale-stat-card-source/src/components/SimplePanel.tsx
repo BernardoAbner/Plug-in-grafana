@@ -829,6 +829,11 @@ const AlertBadgePopover: React.FC<{ badge: BadgeInfo, tStart: number, tEnd: numb
   const [triggerRect, setTriggerRect] = useState<DOMRect | null>(null);
   const triggerRef = useRef<HTMLDivElement>(null);
 
+  const handleClose = useCallback(() => {
+    setIsPinned(false);
+    setIsHovered(false);
+  }, []);
+
   if (badge.state === 'normal') return null;
 
   const isOpen = isHovered || isPinned;
@@ -858,11 +863,6 @@ const AlertBadgePopover: React.FC<{ badge: BadgeInfo, tStart: number, tEnd: numb
       setIsPinned(true);
     }
   };
-
-  const handleClose = useCallback(() => {
-    setIsPinned(false);
-    setIsHovered(false);
-  }, []);
 
   const isValidHex = /^#[0-9A-Fa-f]{6}$/.test(badge.color);
   const hexToRgba = (hex: string, alpha: number): string => {
