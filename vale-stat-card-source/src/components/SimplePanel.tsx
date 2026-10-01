@@ -1,4 +1,5 @@
-import React, { useMemo, useRef, useState, useLayoutEffect, useCallback } from 'react';
+import React, { useMemo, useRef, useState, useLayoutEffect, useCallback, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
   PanelProps,
   Field,
@@ -643,26 +644,80 @@ function formatShortTime(ts: number): string {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-const AlertBadgePopover: React.FC<{ badge: BadgeInfo, tStart: number, tEnd: number, styles: any }> = ({ badge, tStart, tEnd, styles }) => {
-  const [isHovered, setIsHovered] = useState(false);
-  const [isPinned, setIsPinned] = useState(false);
+/**
+ * Portal do popup: renderiza diretamente em document.body via createPortal,
+ * escapando do overflow:hidden do painel Grafana. A posição é calculada
+ * com getBoundingClientRect() do botão de trigger.
+ */
+const AlertPopupPortal: React.FC<{
+  badge: BadgeInfo;
+  tStart: number;
+  tEnd: number;
+  triggerRect: DOMRect;
+  isPinned: boolean;
+  onClose: () => void;
+}> = ({ badge, tStart, tEnd, triggerRect, isPinned, onClose }) => {
+  const popupRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ top: 0, left: 0, opacity: 0 });
 
-  if (badge.state === 'normal') return null;
-
-  const isOpen = isHovered || isPinned;
-  const bgColor = `color-mix(in srgb, ${badge.color} 15%, transparent)`;
-  const borderColor = `color-mix(in srgb, ${badge.color} 35%, transparent)`;
-
-  let content = null;
   const totalMs = badge.episodes.reduce((acc, ep) => acc + ep.durationMs, 0);
-  
+
+  // Calcular posição real na tela após montar (para saber largura/altura real do popup)
+  useEffect(() => {
+    if (!popupRef.current) return;
+    const popup = popupRef.current;
+    const popupW = popup.offsetWidth;
+    const popupH = popup.offsetHeight;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    // Preferência: aparecer ACIMA e alinhado à direita do botão
+    let top = triggerRect.top - popupH - 8;
+    let left = triggerRect.right - popupW;
+
+    // Se cortar no topo, aparecer abaixo
+    if (top < 8) {
+      top = triggerRect.bottom + 8;
+    }
+    // Se cortar na direita, alinhar à esquerda do botão
+    if (left + popupW > vw - 8) {
+      left = vw - popupW - 8;
+    }
+    // Se cortar na esquerda, travar na borda
+    if (left < 8) {
+      left = 8;
+    }
+    // Se cortar embaixo, subir
+    if (top + popupH > vh - 8) {
+      top = vh - popupH - 8;
+    }
+
+    setPos({ top, left, opacity: 1 });
+  }, [triggerRect]);
+
+  // Fechar com Escape
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
+  // Nota: sem handler de click-outside — múltiplos popups podem ficar
+  // pinados ao mesmo tempo. Cada um fecha pelo próprio X, Escape ou
+  // segundo clique no seu botão de exclamação.
+
+  let content: React.ReactNode = null;
+
   if (badge.episodes.length === 1) {
     const ep = badge.episodes[0];
     if (badge.state === 'active') {
       content = (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <div style={{ color: badge.color, fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-            ! Threshold excedido
+            <Icon name="exclamation-triangle" size="sm" style={{ color: badge.color, flexShrink: 0 }} />
+            Threshold excedido
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 3, opacity: 0.9 }}>
             <div><strong>Início:</strong> {formatShortTime(ep.startTs)}</div>
@@ -674,11 +729,12 @@ const AlertBadgePopover: React.FC<{ badge: BadgeInfo, tStart: number, tEnd: numb
       content = (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <div style={{ color: badge.color, fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-            ! Alerta normalizado
+            <Icon name="exclamation-triangle" size="sm" style={{ color: badge.color, flexShrink: 0 }} />
+            Alerta normalizado
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 3, opacity: 0.9 }}>
-            <div><strong>Período:</strong> {formatShortTime(ep.startTs)} até {formatShortTime(ep.endTs)}</div>
-            <div><strong>Duração:</strong> {humanDuration(ep.durationMs, 'ms')} no período visível</div>
+            <div><strong>Janela de amostra:</strong> {formatShortTime(ep.startTs)} até {formatShortTime(ep.endTs)}</div>
+            <div><strong>Duração em alerta:</strong> {humanDuration(ep.durationMs, 'ms')} no gráfico</div>
           </div>
         </div>
       );
@@ -687,10 +743,10 @@ const AlertBadgePopover: React.FC<{ badge: BadgeInfo, tStart: number, tEnd: numb
     content = (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <div style={{ color: badge.color, fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
-          ! {badge.state === 'active' ? 'Threshold excedido' : 'Alerta normalizado'}
+          <Icon name="exclamation-triangle" size="sm" style={{ color: badge.color, flexShrink: 0 }} />
+          {badge.state === 'active' ? 'Threshold excedido' : 'Alerta normalizado'}
         </div>
-        <div style={{ opacity: 0.6, fontSize: 11, marginBottom: 4 }}>Período: {formatShortTime(tStart)} – {formatShortTime(tEnd)}</div>
-        
+        <div style={{ opacity: 0.6, fontSize: 11, marginBottom: 4 }}>Janela de amostra do gráfico: {formatShortTime(tStart)} – {formatShortTime(tEnd)}</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
           {badge.episodes.map((ep, i) => (
             <div key={i} style={{
@@ -712,83 +768,154 @@ const AlertBadgePopover: React.FC<{ badge: BadgeInfo, tStart: number, tEnd: numb
     );
   }
 
-  const showPopover = isHovered || isPinned;
-
-  const renderPopoverContent = () => (
+  return createPortal(
     <div
+      ref={popupRef}
+      onClick={(e) => e.stopPropagation()}
       style={{
-        minWidth: 250, maxWidth: 400,
-        backgroundColor: 'rgba(11, 16, 21, 0.95)',
-        backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)',
-        borderRadius: '6px',
-        border: 'none', // Sem borda cinza externa
-        boxShadow: '0 8px 16px rgba(0,0,0,0.6)',
-        padding: '12px',
-        color: '#fff',
+        position: 'fixed',
+        top: pos.top,
+        left: pos.left,
+        opacity: pos.opacity,
+        transition: 'opacity 0.15s ease',
+        zIndex: 99999,
+        minWidth: 250,
+        maxWidth: 400,
+        backgroundColor: 'rgba(11, 16, 21, 0.97)',
+        backdropFilter: 'blur(12px)',
+        WebkitBackdropFilter: 'blur(12px)',
+        borderRadius: '8px',
+        border: `1px solid color-mix(in srgb, ${badge.color} 30%, rgba(255,255,255,0.08))`,
+        boxShadow: `0 12px 32px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.04), 0 0 20px color-mix(in srgb, ${badge.color} 12%, transparent)`,
+        padding: '14px 14px 12px',
+        color: '#e2e8f0',
         fontSize: '12px',
-        maxHeight: 250, overflowY: 'auto',
-        lineHeight: 1.4,
-        position: 'relative'
+        maxHeight: 320,
+        overflowY: 'auto',
+        lineHeight: 1.5,
+        pointerEvents: 'all',
       }}
     >
-       {isPinned && (
-         <div 
-           onClick={(e) => { e.stopPropagation(); setIsPinned(false); setIsHovered(false); }}
-           style={{ position: 'absolute', top: 8, right: 8, cursor: 'pointer', opacity: 0.5, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-           title="Fechar"
-         >
-           <Icon name="times" size="lg" />
-         </div>
-       )}
-       {content}
-    </div>
+      {/* Botão X — visível apenas quando pinado */}
+      {isPinned && (
+        <div
+          onClick={(e) => { e.stopPropagation(); onClose(); }}
+          title="Fechar (Esc)"
+          style={{
+            position: 'absolute', top: 8, right: 8,
+            cursor: 'pointer',
+            width: 20, height: 20,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            borderRadius: '50%',
+            backgroundColor: 'rgba(255,255,255,0.07)',
+            opacity: 0.7,
+            transition: 'opacity 0.15s, background-color 0.15s',
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = '1'; (e.currentTarget as HTMLElement).style.backgroundColor = 'rgba(255,255,255,0.15)'; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = '0.7'; (e.currentTarget as HTMLElement).style.backgroundColor = 'rgba(255,255,255,0.07)'; }}
+        >
+          <Icon name="times" size="sm" />
+        </div>
+      )}
+      {content}
+    </div>,
+    document.body
   );
+};
 
-  // Cores glassmorphism: fundo translúcido 15% e ícone/borda brilhante na cor do estado
+const AlertBadgePopover: React.FC<{ badge: BadgeInfo, tStart: number, tEnd: number, styles: any }> = ({ badge, tStart, tEnd, styles }) => {
+  const [isHovered, setIsHovered] = useState(false);
+  const [isPinned, setIsPinned] = useState(false);
+  const [triggerRect, setTriggerRect] = useState<DOMRect | null>(null);
+  const triggerRef = useRef<HTMLDivElement>(null);
+
+  if (badge.state === 'normal') return null;
+
+  const isOpen = isHovered || isPinned;
+
+  const handleMouseEnter = () => {
+    if (triggerRef.current) {
+      setTriggerRect(triggerRef.current.getBoundingClientRect());
+    }
+    setIsHovered(true);
+  };
+
+  const handleMouseLeave = () => {
+    if (!isPinned) setIsHovered(false);
+  };
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (triggerRef.current) {
+      setTriggerRect(triggerRef.current.getBoundingClientRect());
+    }
+    if (isPinned) {
+      // Já pinado: clique na exclamação fecha
+      setIsPinned(false);
+      setIsHovered(false);
+    } else {
+      // Abrir e pinar
+      setIsPinned(true);
+    }
+  };
+
+  const handleClose = useCallback(() => {
+    setIsPinned(false);
+    setIsHovered(false);
+  }, []);
+
+  const isValidHex = /^#[0-9A-Fa-f]{6}$/.test(badge.color);
   const hexToRgba = (hex: string, alpha: number): string => {
     const r = parseInt(hex.slice(1, 3), 16);
     const g = parseInt(hex.slice(3, 5), 16);
     const b = parseInt(hex.slice(5, 7), 16);
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
   };
-  const isValidHex = /^#[0-9A-Fa-f]{6}$/.test(badge.color);
   const badgeBg = isValidHex ? hexToRgba(badge.color, 0.15) : `color-mix(in srgb, ${badge.color} 15%, transparent)`;
   const badgeBorder = isValidHex ? hexToRgba(badge.color, 0.45) : `color-mix(in srgb, ${badge.color} 45%, transparent)`;
 
   return (
-    <div 
-       style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, position: 'relative' }}
-       onMouseEnter={() => setIsHovered(true)}
-       onMouseLeave={() => !isPinned && setIsHovered(false)}
+    <div
+      style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, position: 'relative' }}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
     >
+      {/* Botão de exclamação */}
       <div
+        ref={triggerRef}
         style={{
           width: 22, height: 22, borderRadius: '50%',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontWeight: 'bold', fontSize: 13,
           color: badge.color,
-          backgroundColor: badgeBg,
+          backgroundColor: isPinned
+            ? (isValidHex ? hexToRgba(badge.color, 0.3) : `color-mix(in srgb, ${badge.color} 30%, transparent)`)
+            : badgeBg,
           border: `1.5px solid ${badgeBorder}`,
           cursor: 'pointer',
           flexShrink: 0,
-          transition: 'transform 0.15s ease, box-shadow 0.15s ease',
-          boxShadow: `0 0 6px ${badgeBorder}`,
+          transition: 'transform 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease',
+          boxShadow: isPinned
+            ? `0 0 10px ${badgeBorder}`
+            : `0 0 6px ${badgeBorder}`,
+          transform: isPinned ? 'scale(1.1)' : 'scale(1)',
         }}
-        onClick={(e) => { e.stopPropagation(); setIsPinned(!isPinned); }}
+        onClick={handleClick}
+        title={isPinned ? 'Clique para fechar' : 'Clique para fixar'}
       >
         !
       </div>
 
-      {showPopover && (
-         <div 
-           onClick={(e) => e.stopPropagation()}
-           style={{
-             position: 'absolute', bottom: 30, right: 0,
-             zIndex: 9999
-           }}
-         >
-           {renderPopoverContent()}
-         </div>
+      {/* Portal: renderizado fora do DOM do painel, direto no body */}
+      {isOpen && triggerRect && (
+        <AlertPopupPortal
+          badge={badge}
+          tStart={tStart}
+          tEnd={tEnd}
+          triggerRect={triggerRect}
+          isPinned={isPinned}
+          onClose={handleClose}
+        />
       )}
     </div>
   );
