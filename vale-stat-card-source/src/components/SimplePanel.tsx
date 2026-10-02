@@ -158,6 +158,13 @@ export interface AlertEpisode {
   endTs: number;
   durationMs: number;
   color: string;
+  /** Estatísticas dos valores reais durante o episódio */
+  avgValue: number;
+  minValue: number;
+  maxValue: number;
+  /** Campos internos para cálculo incremental */
+  _sum: number;
+  _count: number;
 }
 
 /**
@@ -205,6 +212,11 @@ function getAlertEpisodes(
         // Continua no mesmo episódio de violação
         currentEpisode.endTs = to;
         currentEpisode.durationMs += (to - from);
+        currentEpisode._sum += value;
+        currentEpisode._count += 1;
+        currentEpisode.avgValue = currentEpisode._sum / currentEpisode._count;
+        if (value < currentEpisode.minValue) currentEpisode.minValue = value;
+        if (value > currentEpisode.maxValue) currentEpisode.maxValue = value;
       } else {
         // Inicia novo episódio (mudou a cor do threshold ou voltou do normal)
         if (currentEpisode) { episodes.push(currentEpisode); }
@@ -213,6 +225,11 @@ function getAlertEpisodes(
           endTs: to,
           durationMs: to - from,
           color: step.color,
+          avgValue: value,
+          minValue: value,
+          maxValue: value,
+          _sum: value,
+          _count: 1,
         };
         currentStepValue = step.value;
       }
@@ -423,7 +440,7 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string |
       flex-direction: column;
       flex: 1;
       min-height: 0;
-      z-index: 1;
+      z-index: 4;
       margin-top: ${theme.spacing(0.25)};
     `,
     chartArea: css`
@@ -484,7 +501,7 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string |
     tooltip: css`
       position: absolute;
       pointer-events: none;
-      z-index: 100;
+      z-index: 200;
       background: ${tooltipBg};
       border: 1px solid ${tooltipBorder};
       border-radius: 6px;
@@ -656,7 +673,8 @@ const AlertPopupPortal: React.FC<{
   triggerRect: DOMRect;
   isPinned: boolean;
   onClose: () => void;
-}> = ({ badge, tStart, tEnd, triggerRect, isPinned, onClose }) => {
+  formatValue: (v: number) => string;
+}> = ({ badge, tStart, tEnd, triggerRect, isPinned, onClose, formatValue }) => {
   const popupRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ top: 0, left: 0, opacity: 0 });
 
@@ -723,6 +741,20 @@ const AlertPopupPortal: React.FC<{
             <div><strong>Início:</strong> {formatShortTime(ep.startTs)}</div>
             <div><strong>Duração:</strong> {humanDuration(ep.durationMs, 'ms')}</div>
           </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4, marginTop: 4, padding: '6px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.04)' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+              <span style={{ fontSize: 10, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Pico</span>
+              <span style={{ fontWeight: 700, color: badge.color }}>{formatValue(ep.maxValue)}</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' }}>
+              <span style={{ fontSize: 10, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Média</span>
+              <span style={{ fontWeight: 600 }}>{formatValue(ep.avgValue)}</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+              <span style={{ fontSize: 10, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Mínimo</span>
+              <span style={{ fontWeight: 600, opacity: 0.8 }}>{formatValue(ep.minValue)}</span>
+            </div>
+          </div>
         </div>
       );
     } else {
@@ -735,6 +767,20 @@ const AlertPopupPortal: React.FC<{
           <div style={{ display: 'flex', flexDirection: 'column', gap: 3, opacity: 0.9 }}>
             <div><strong>Janela de amostra:</strong> {formatShortTime(ep.startTs)} até {formatShortTime(ep.endTs)}</div>
             <div><strong>Duração em alerta:</strong> {humanDuration(ep.durationMs, 'ms')} no gráfico</div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4, marginTop: 4, padding: '6px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.04)' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+              <span style={{ fontSize: 10, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Pico</span>
+              <span style={{ fontWeight: 700, color: badge.color }}>{formatValue(ep.maxValue)}</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' }}>
+              <span style={{ fontSize: 10, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Média</span>
+              <span style={{ fontWeight: 600 }}>{formatValue(ep.avgValue)}</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+              <span style={{ fontSize: 10, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Mínimo</span>
+              <span style={{ fontWeight: 600, opacity: 0.8 }}>{formatValue(ep.minValue)}</span>
+            </div>
           </div>
         </div>
       );
@@ -758,12 +804,49 @@ const AlertPopupPortal: React.FC<{
               <div><strong>Início:</strong> {formatShortTime(ep.startTs)}</div>
               <div><strong>Fim:</strong> {formatShortTime(ep.endTs)}</div>
               <div><strong>Duração:</strong> {humanDuration(ep.durationMs, 'ms')}</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4, marginTop: 4, padding: '5px 6px', borderRadius: 5, background: 'rgba(255,255,255,0.04)' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                  <span style={{ fontSize: 9, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Pico</span>
+                  <span style={{ fontWeight: 700, fontSize: 11, color: badge.color }}>{formatValue(ep.maxValue)}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' }}>
+                  <span style={{ fontSize: 9, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Média</span>
+                  <span style={{ fontWeight: 600, fontSize: 11 }}>{formatValue(ep.avgValue)}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                  <span style={{ fontSize: 9, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Mínimo</span>
+                  <span style={{ fontWeight: 600, fontSize: 11, opacity: 0.8 }}>{formatValue(ep.minValue)}</span>
+                </div>
+              </div>
             </div>
           ))}
         </div>
-        <div style={{ fontWeight: 600, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 8, marginTop: 2 }}>
-          Total em alerta: {humanDuration(totalMs, 'ms')}
-        </div>
+        {(() => {
+          const totalWeightedSum = badge.episodes.reduce((acc, ep) => acc + ep.avgValue * ep.durationMs, 0);
+          const totalDurationMs = badge.episodes.reduce((acc, ep) => acc + ep.durationMs, 0);
+          const overallAvg = totalDurationMs > 0 ? totalWeightedSum / totalDurationMs : 0;
+          const overallMax = Math.max(...badge.episodes.map(ep => ep.maxValue));
+          const overallMin = Math.min(...badge.episodes.map(ep => ep.minValue));
+          return (
+            <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 8, marginTop: 2, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ fontWeight: 600 }}>Total em alerta: {humanDuration(totalMs, 'ms')}</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4, padding: '6px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.04)' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                  <span style={{ fontSize: 10, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Pico geral</span>
+                  <span style={{ fontWeight: 700, color: badge.color }}>{formatValue(overallMax)}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' }}>
+                  <span style={{ fontSize: 10, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Média geral</span>
+                  <span style={{ fontWeight: 600 }}>{formatValue(overallAvg)}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                  <span style={{ fontSize: 10, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Mín. geral</span>
+                  <span style={{ fontWeight: 600, opacity: 0.8 }}>{formatValue(overallMin)}</span>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
     );
   }
@@ -823,11 +906,14 @@ const AlertPopupPortal: React.FC<{
   );
 };
 
-const AlertBadgePopover: React.FC<{ badge: BadgeInfo, tStart: number, tEnd: number, styles: any }> = ({ badge, tStart, tEnd, styles }) => {
+const AlertBadgePopover: React.FC<{ badge: BadgeInfo, tStart: number, tEnd: number, styles: any, field: Field }> = ({ badge, tStart, tEnd, styles, field }) => {
   const [isHovered, setIsHovered] = useState(false);
   const [isPinned, setIsPinned] = useState(false);
   const [triggerRect, setTriggerRect] = useState<DOMRect | null>(null);
   const triggerRef = useRef<HTMLDivElement>(null);
+
+  const theme = useTheme2();
+  const formatValue = useCallback((v: number) => formatFieldValue(v, field, theme).text, [field, theme]);
 
   const handleClose = useCallback(() => {
     setIsPinned(false);
@@ -876,7 +962,7 @@ const AlertBadgePopover: React.FC<{ badge: BadgeInfo, tStart: number, tEnd: numb
 
   return (
     <div
-      style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, position: 'relative' }}
+      style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, position: 'relative', zIndex: 10 }}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
@@ -915,6 +1001,7 @@ const AlertBadgePopover: React.FC<{ badge: BadgeInfo, tStart: number, tEnd: numb
           triggerRect={triggerRect}
           isPinned={isPinned}
           onClose={handleClose}
+          formatValue={formatValue}
         />
       )}
     </div>
@@ -1163,7 +1250,23 @@ export const SimplePanel: React.FC<Props> = ({
     }
   }
 
-  const tooltipStyle: React.CSSProperties = hover ? { display: 'block', left: (plotX + hover.px + 14), top: (plotY + hover.py + 10), maxWidth: 172 } : { display: 'none' };
+  // Tooltip smart positioning: mantém dentro dos limites do chartArea.
+  // - Se o cursor está no terço inferior do gráfico, o tooltip aparece ACIMA do cursor
+  //   (evita cobrir o eixo X e vazar para baixo do chart).
+  // - O top é clampado a um mínimo de 4px para nunca vazar para cima (e ser coberto pelos KPI cards).
+  const TOOLTIP_EST_HEIGHT = 90; // altura estimada do tooltip (px)
+  const XAXIS_RESERVE = 22;     // espaço reservado para o eixo X no fundo
+  const tooltipThreshold = svgH * 0.55; // abaixo desse py, tooltip inverte para cima
+  const tooltipStyle: React.CSSProperties = (() => {
+    if (!hover) return { display: 'none' };
+    const rawTop = plotY + hover.py + 10;
+    const flipTop = plotY + hover.py - TOOLTIP_EST_HEIGHT - 6;
+    const useFlip = hover.py > tooltipThreshold;
+    const top = Math.max(4, useFlip ? flipTop : rawTop);
+    // Garante que o tooltip não ultrapasse o fundo (eixo X)
+    const maxTop = svgH - XAXIS_RESERVE - TOOLTIP_EST_HEIGHT;
+    return { display: 'block', left: plotX + hover.px + 14, top: Math.min(top, Math.max(4, maxTop)), maxWidth: 172 };
+  })();
   const axisTextColor = theme.isDark ? 'rgba(255,255,255,0.55)' : theme.colors.text.secondary;
   const axisLineColor = theme.isDark ? 'rgba(255,255,255,0.08)' : theme.colors.border.weak;
   const gridLineColor = theme.isDark ? 'rgba(255,255,255,0.07)' : theme.colors.border.weak;
@@ -1256,11 +1359,29 @@ export const SimplePanel: React.FC<Props> = ({
             )}
           </div>
 
-          {!hasMultipleSeries && singleShowValue && (
-            <span className={styles.value} style={{ color: valueColor }}>
-              {displayValue ?? '—'}
-            </span>
-          )}
+          {!hasMultipleSeries && singleShowValue && (() => {
+            const singleS = allSeriesInfos[0];
+            const singleLastVal = singleS
+              ? (singleS.values.reduceRight((found: number | null, v) => found !== null ? found : (v !== null && !isNaN(v) ? v : null), null))
+              : null;
+            const singleThr = singleS ? getFieldThresholds(singleS.field) : undefined;
+            return (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                <span className={styles.value} style={{ color: valueColor }}>
+                  {displayValue ?? '—'}
+                </span>
+                {singleS && singleLastVal !== null && (
+                  <AlertBadgePopover
+                    badge={getBadgeState(singleLastVal, singleS.values, singleS.timeValues, singleThr, tStart, tEnd, theme)}
+                    tStart={tStart}
+                    tEnd={tEnd}
+                    styles={styles}
+                    field={singleS.field}
+                  />
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -1423,6 +1544,7 @@ export const SimplePanel: React.FC<Props> = ({
                        tStart={tStart}
                        tEnd={tEnd}
                        styles={styles}
+                       field={s.field}
                     />
                   </div>
                 )}
