@@ -108,13 +108,14 @@ export interface UplotChartProps {
   onHover: (ts: number | null, points: any[] | null, px: number, py: number) => void;
   onClickTimeRange?: (from: number, to: number) => void;
   onDoubleClick?: () => void;
+  onChartClick?: (ts: number | null, points: any[] | null, px: number, py: number) => void;
 }
 
 export const UplotChart: React.FC<UplotChartProps> = ({
   width, height, seriesInfos, times, timeRange, chartType, lineInterpolation, linePattern,
   lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis,
   yLo, yHi, theme, thresholdMode, useThreshold, thresholdLines, getSeriesColor,
-  axisTextColor, axisLineColor, gridLineColor, selectedSeriesIndex, onHover, onClickTimeRange, onDoubleClick
+  axisTextColor, axisLineColor, gridLineColor, selectedSeriesIndex, onHover, onClickTimeRange, onDoubleClick, onChartClick
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -529,6 +530,20 @@ export const UplotChart: React.FC<UplotChartProps> = ({
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       onDoubleClick={onDoubleClick}
+      onMouseUp={(e) => {
+        if (!onChartClick) return;
+        const u = uplotRef.current;
+        if (!u) return;
+        // Espera o uPlot processar a seleção no event loop
+        setTimeout(() => {
+          if (u.select && u.select.width > 2) return;
+          // Pega as coordenadas e timestamp diretamente do cursor atualizado do uPlot
+          const cx = u.cursor.left || 0;
+          const cy = u.cursor.top || 0;
+          const ts = u.cursor.idx != null ? times[u.cursor.idx] : null;
+          onChartClick(ts ? ts * 1000 : null, null, cx, cy);
+        }, 10);
+      }}
     >
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
       <div ref={markersContainerRef} style={{ pointerEvents: 'none', position: 'absolute', inset: 0, overflow: 'hidden' }}>

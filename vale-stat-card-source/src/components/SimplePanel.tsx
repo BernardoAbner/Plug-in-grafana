@@ -66,24 +66,6 @@ function formatFieldValue(raw: unknown, field: Field, theme: GrafanaTheme2): { t
   return { text: display.text + (display.suffix ? display.suffix : ''), color: display.color };
 }
 
-function getThresholdAlert(val: number, field: Field, theme: GrafanaTheme2): { isAlert: boolean; color: string } {
-  const displayProcessor = field.display || getDisplayProcessor({ field, theme });
-  const display = displayProcessor(val);
-  const thresholds = field.config.thresholds?.steps;
-  
-  if (!display || !thresholds || thresholds.length <= 1) {
-    return { isAlert: false, color: '#9CA3AF' };
-  }
-
-  const baseColor = thresholds[0].color;
-  const isViolated = display.color !== baseColor && display.color !== undefined;
-
-  return {
-    isAlert: isViolated,
-    color: display.color || '#9CA3AF',
-  };
-}
-
 const badgeAlertStyle = (color: string): React.CSSProperties => ({
   color: color,
   fontWeight: 600,
@@ -129,6 +111,16 @@ function getFieldThresholds(field: Field): NativeThresholdsConfig | undefined {
     };
   }
   return undefined;
+}
+
+/**
+ * Retorna a cor do threshold violado para um valor isolado (ex.: mínimo, média, pico).
+ * Retorna null quando o valor está no step base (sem violação) — mantém a cor natural.
+ */
+function getViolationColor(value: number | null, field: Field): string | null {
+  if (value === null || isNaN(value)) { return null; }
+  const step = getActiveNativeThreshold(value, getFieldThresholds(field));
+  return step && step.value !== null && step.color ? step.color : null;
 }
 
 interface AlertDuration { value: number; color: string; durationMs: number; }
@@ -377,7 +369,7 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string |
       display: flex;
       align-items: center;
       gap: ${theme.spacing(1)};
-      padding: ${theme.spacing(1.5)} ${theme.spacing(2)} ${theme.spacing(0.5)};
+      padding: ${theme.spacing(1.5)} ${theme.spacing(3.5)} ${theme.spacing(0.5)} ${theme.spacing(2)};
       z-index: 3;
       flex-shrink: 0;
     `,
@@ -547,7 +539,7 @@ const getStyles = (theme: GrafanaTheme2, accent: string, valueFontSize: string |
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
       gap: ${theme.spacing(0.75)};
-      padding: ${theme.spacing(1)} ${theme.spacing(2)} ${theme.spacing(0.5)};
+      padding: ${theme.spacing(1)} ${theme.spacing(3.5)} ${theme.spacing(0.5)} ${theme.spacing(2)};
       z-index: 3;
       flex-shrink: 0;
     `,
@@ -1023,6 +1015,7 @@ export const SimplePanel: React.FC<Props> = ({
   const headerRef = useRef<HTMLDivElement>(null);
   const [headerH, setHeaderH] = useState(52);
   const [hover, setHover] = useState<HoverState | null>(null);
+  const [pinnedHover, setPinnedHover] = useState<HoverState | null>(null);
   const [hiddenSeries, setHiddenSeries] = useState<Set<number>>(new Set());
   const [selectedSeriesIndex, setSelectedSeriesIndex] = useState<number | null>(null);
 
@@ -1257,15 +1250,17 @@ export const SimplePanel: React.FC<Props> = ({
   const TOOLTIP_EST_HEIGHT = 90; // altura estimada do tooltip (px)
   const XAXIS_RESERVE = 22;     // espaço reservado para o eixo X no fundo
   const tooltipThreshold = svgH * 0.55; // abaixo desse py, tooltip inverte para cima
+  // Tooltip ativo: pinnedHover tem prioridade sobre liveHover
+  const activeHover = pinnedHover ?? hover;
   const tooltipStyle: React.CSSProperties = (() => {
-    if (!hover) return { display: 'none' };
-    const rawTop = plotY + hover.py + 10;
-    const flipTop = plotY + hover.py - TOOLTIP_EST_HEIGHT - 6;
-    const useFlip = hover.py > tooltipThreshold;
+    if (!activeHover) return { display: 'none' };
+    const rawTop = plotY + activeHover.py + 10;
+    const flipTop = plotY + activeHover.py - TOOLTIP_EST_HEIGHT - 6;
+    const useFlip = activeHover.py > tooltipThreshold;
     const top = Math.max(4, useFlip ? flipTop : rawTop);
     // Garante que o tooltip não ultrapasse o fundo (eixo X)
     const maxTop = svgH - XAXIS_RESERVE - TOOLTIP_EST_HEIGHT;
-    return { display: 'block', left: plotX + hover.px + 14, top: Math.min(top, Math.max(4, maxTop)), maxWidth: 172 };
+    return { display: 'block', left: plotX + activeHover.px + 14, top: Math.min(top, Math.max(4, maxTop)), maxWidth: 172 };
   })();
   const axisTextColor = theme.isDark ? 'rgba(255,255,255,0.55)' : theme.colors.text.secondary;
   const axisLineColor = theme.isDark ? 'rgba(255,255,255,0.08)' : theme.colors.border.weak;
@@ -1297,8 +1292,13 @@ export const SimplePanel: React.FC<Props> = ({
   const iconColor = (colorIconByThreshold && activeSingleThresholdColor) ? activeSingleThresholdColor : accent;
   const labelColor = (colorLabelByThreshold && activeSingleThresholdColor) ? activeSingleThresholdColor : accent;
   const valueColor = (colorValueByThreshold && activeSingleThresholdColor) ? activeSingleThresholdColor : '#FFFFFF';
-  // O resumo (min/méd/pico) sempre acompanha a cor do valor da métrica
-  const summaryColor = valueColor;
+  // O resumo (min/méd/pico) é avaliado individualmente: cada estatística só assume
+  // a cor do threshold se ELA PRÓPRIA violar um step; caso contrário mantém a cor natural.
+  const summaryByThreshold = colorSummaryByThreshold;
+  const summaryColor = '#FFFFFF';
+  const summaryField = periodSummaryInfos[0]?.field;
+  const statColor = (v: number | null): string =>
+    (summaryByThreshold && summaryField && getViolationColor(v, summaryField)) || summaryColor;
 
   return (
     <div className={cx(styles.card, css`width: ${width}px; height: ${height}px;`)}>
@@ -1329,21 +1329,21 @@ export const SimplePanel: React.FC<Props> = ({
                    const nodes: React.ReactNode[] = [];
                    if (options.showPeriodMin && periodMin !== null) {
                      nodes.push(
-                       <span key="min" className={styles.periodStat} style={{ opacity: 0.8 }}>
+                       <span key="min" className={styles.periodStat} style={{ color: statColor(periodMin), opacity: 0.8 }}>
                          Mínimo {formatFieldValue(periodMin, periodSummaryInfos[0].field, theme).text}
                        </span>
                      );
                    }
                    if (options.showPeriodAverage && periodAverage !== null) {
                      nodes.push(
-                       <span key="avg" className={styles.periodStat} style={{ opacity: 0.8 }}>
+                       <span key="avg" className={styles.periodStat} style={{ color: statColor(periodAverage), opacity: 0.8 }}>
                          Média {formatFieldValue(periodAverage, periodSummaryInfos[0].field, theme).text}
                        </span>
                      );
                    }
                    if (options.showPeriodPeak && periodPeak !== null) {
                      nodes.push(
-                       <span key="max" className={styles.periodStat} style={{ opacity: 0.8 }}>
+                       <span key="max" className={styles.periodStat} style={{ color: statColor(periodPeak), opacity: 0.8 }}>
                          Pico {formatFieldValue(periodPeak, periodSummaryInfos[0].field, theme).text}
                        </span>
                      );
@@ -1439,8 +1439,9 @@ export const SimplePanel: React.FC<Props> = ({
             const multiIconColor = (colorIconByThreshold && activeViolationColor) ? activeViolationColor : seriesBaseColor;
             const multiLabelColor = (colorLabelByThreshold && activeViolationColor) ? activeViolationColor : seriesBaseColor;
             const multiValueColor = (colorValueByThreshold && activeViolationColor) ? activeViolationColor : '#FFFFFF';
-            // O resumo (min/méd/pico) sempre acompanha a cor do valor da métrica
-            const multiSummaryColor = multiValueColor;
+            // Cor natural do resumo (separadores e estatísticas sem violação)
+            const multiSummaryColor = '#FFFFFF';
+            const multiSummaryByThreshold = colorSummaryByThreshold;
 
             // Resumo do período para este card
             const validVals = s.values.filter((v) => v !== null && !isNaN(v));
@@ -1448,9 +1449,10 @@ export const SimplePanel: React.FC<Props> = ({
             const cardAvg = validVals.length ? validVals.reduce((a, b) => a + b, 0) / validVals.length : null;
             const cardMax = validVals.length ? Math.max(...validVals) : null;
 
-            const minAlert = cardMin !== null ? getThresholdAlert(cardMin, s.field, theme) : null;
-            const avgAlert = cardAvg !== null ? getThresholdAlert(cardAvg, s.field, theme) : null;
-            const maxAlert = cardMax !== null ? getThresholdAlert(cardMax, s.field, theme) : null;
+            // Cada estatística é avaliada individualmente contra os thresholds
+            const minColor = (multiSummaryByThreshold && getViolationColor(cardMin, s.field)) || multiSummaryColor;
+            const avgColor = (multiSummaryByThreshold && getViolationColor(cardAvg, s.field)) || multiSummaryColor;
+            const maxColor = (multiSummaryByThreshold && getViolationColor(cardMax, s.field)) || multiSummaryColor;
 
             const minFormatted = cardMin !== null ? formatFieldValue(cardMin, s.field, theme).text : '';
             const avgFormatted = cardAvg !== null ? formatFieldValue(cardAvg, s.field, theme).text : '';
@@ -1463,21 +1465,21 @@ export const SimplePanel: React.FC<Props> = ({
             if (isSummaryVisible) {
               if (options.showPeriodMin && cardMin !== null) {
                 summaryNodes.push(
-                  <span key="min" style={{ color: multiSummaryColor, opacity: 0.8 }}>
+                  <span key="min" style={{ color: minColor, opacity: 0.8 }}>
                     Min {minFormatted}
                   </span>
                 );
               }
               if (options.showPeriodAverage && cardAvg !== null) {
                 summaryNodes.push(
-                  <span key="avg" style={{ color: multiSummaryColor, opacity: 0.8 }}>
+                  <span key="avg" style={{ color: avgColor, opacity: 0.8 }}>
                     Méd {avgFormatted}
                   </span>
                 );
               }
               if (options.showPeriodPeak && cardMax !== null) {
                 summaryNodes.push(
-                  <span key="max" style={{ color: multiSummaryColor, opacity: 0.8 }}>
+                  <span key="max" style={{ color: maxColor, opacity: 0.8 }}>
                     Max {maxFormatted}
                   </span>
                 );
@@ -1558,10 +1560,29 @@ export const SimplePanel: React.FC<Props> = ({
         <div className={styles.chartWrap}>
           <div className={styles.chartArea}>
             <div className={styles.tooltip} style={tooltipStyle}>
-              {hover && (
+              {activeHover && (
                 <>
-                  <div className={styles.tooltipTime}>{formatTooltipTime(hover.ts)}</div>
-                  {hover.points.map((pt) => (
+                  {/* Header do tooltip: horário + botão de fechar quando pinado */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <div className={styles.tooltipTime}>{formatTooltipTime(activeHover.ts)}</div>
+                    {pinnedHover && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setPinnedHover(null); }}
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer', padding: '0 0 0 6px',
+                          color: 'rgba(255,255,255,0.5)', fontSize: 14, lineHeight: 1, flexShrink: 0,
+                        }}
+                        title="Fechar"
+                      >×</button>
+                    )}
+                  </div>
+                  {/* Indicador visual de pinado */}
+                  {pinnedHover && (
+                    <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginBottom: 4 }}>
+                      📌 Clique no gráfico para soltar
+                    </div>
+                  )}
+                  {activeHover.points.map((pt) => (
                     <div key={pt.name} className={styles.tooltipRow}>
                       <span className={styles.tooltipDot} style={{ backgroundColor: pt.color }} />
                       <span className={styles.tooltipName}>{pt.name}</span>
@@ -1600,6 +1621,7 @@ export const SimplePanel: React.FC<Props> = ({
               gridLineColor={gridLineColor}
               selectedSeriesIndex={selectedSeriesIndex}
               onHover={(ts, points, px, py) => {
+                if (pinnedHover) return; // Não atualiza hover se há um pinado
                 if (!ts || !points) {
                   setHover(null);
                 } else {
@@ -1613,6 +1635,17 @@ export const SimplePanel: React.FC<Props> = ({
                       color: p.color
                     }))
                   });
+                }
+              }}
+              onChartClick={(ts, _points, px, py) => {
+                if (pinnedHover) {
+                  // Segundo clique: desfixa
+                  setPinnedHover(null);
+                  return;
+                }
+                // Primeiro clique: fixa o hover atual
+                if (hover) {
+                  setPinnedHover({ ...hover, px, py });
                 }
               }}
               onClickTimeRange={(from, to) => {
