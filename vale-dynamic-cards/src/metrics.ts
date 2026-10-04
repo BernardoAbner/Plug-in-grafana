@@ -50,8 +50,8 @@ export function selectMetrics(
   options: SimpleOptions
 ): Array<{ config: MetricConfig; metric?: AvailableMetric }> {
   if (options.metricMode !== 'configured') {
-    // Preserve existing dashboards: only the first frame, in its original order.
-    return listMetrics(frames.slice(0, 1)).map((metric, i) => ({ config: { id: `auto-${i}` }, metric }));
+    // Modo automático: exibe todas as métricas de todos os frames (queries) retornados
+    return listMetrics(frames).map((metric, i) => ({ config: { id: `auto-${i}` }, metric }));
   }
   const available = listMetrics(frames);
   return (options.metrics ?? []).map((config) => ({

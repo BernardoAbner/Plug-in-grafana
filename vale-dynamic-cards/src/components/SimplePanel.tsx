@@ -1,43 +1,84 @@
 import React, { useMemo } from 'react';
-import { PanelProps, Field, formattedValueToString, GrafanaTheme2, getDisplayProcessor } from '@grafana/data';
-import { SimpleOptions, CardTheme, MetricSource } from '../types';
+import { PanelProps, Field, formattedValueToString, GrafanaTheme2, getDisplayProcessor, isIconName } from '@grafana/data';
+import { SimpleOptions, CardTheme, MetricSource, CustomFieldConfig } from '../types';
 import { bounded, listMetrics, selectMetrics, sourceKey } from '../metrics';
 import { css, cx } from '@emotion/css';
-import { useStyles2, Icon, useTheme2 } from '@grafana/ui';
+import { useStyles2, Icon, IconName, useTheme2 } from '@grafana/ui';
 import { PanelDataErrorView } from '@grafana/runtime';
+import { NestedGroupPanel } from './NestedGroupPanel';
+
+
+
 
 interface Props extends PanelProps<SimpleOptions> {}
 
-// ─── Mapeamento de ícones ──────────────────────────────────────────────────
-const ICON_MAP: Record<string, string> = {
-  cpu: 'processor',
-  server: 'server',
-  'server-alt': 'server',
-  database: 'database',
+// Verde industrial: cor padrão de todo o plugin quando nenhuma cor é configurada
+const DEFAULT_COLOR = '#00B59B';
+
+/** Resolve nomes de cor do Grafana (ex.: 'green', 'semi-dark-red') para um valor CSS utilizável. */
+function resolveColor(theme: GrafanaTheme2, color: string | undefined, fallback: string = DEFAULT_COLOR): string {
+  // Intercepta a cor legada que foi injetada no JSON do dashboard e atualiza automaticamente
+  if (!color || color.toUpperCase() === '#32D1A7') {
+    return fallback;
+  }
+  try {
+    return theme.visualization.getColorByName(color);
+  } catch (e) {
+    return color;
+  }
+}
+
+// ─── Resolução de ícones ───────────────────────────────────────────────────
+// Alguns ícones do catálogo industrial não existem no conjunto do Grafana UI;
+// estes aliases garantem um ícone visualmente equivalente em vez de um ícone quebrado.
+const CARD_ICON_FALLBACKS: Record<string, IconName> = {
+  server: 'database',
   hdd: 'save',
-  'network-wired': 'plug-connected',
-  temperature: 'gf-interpolation',
-  wifi: 'wifi',
-  bolt: 'bolt',
-  'check-circle': 'check-circle',
-  'exclamation-triangle': 'exclamation-triangle',
-  alert: 'alert',
-  'bell-slash': 'bell-slash',
-  'times-circle': 'times',
-  heartbeat: 'heart',
-  'arrow-up': 'arrow-up',
-  'arrow-down': 'arrow-down',
-  'chart-line': 'chart-line',
-  signal: 'signal',
-  clock: 'clock',
-  heart: 'heart',
-  shield: 'shield',
-  apps: 'apps',
+  wifi: 'signal',
+  radio: 'rss',
 };
 
-function resolveIconName(icon?: string): string {
-  if (!icon) {return 'apps';}
-  return ICON_MAP[icon] ?? 'apps';
+function resolveCardIconName(icon: string): IconName {
+  if (CARD_ICON_FALLBACKS[icon]) {
+    return CARD_ICON_FALLBACKS[icon];
+  }
+  if (isIconName(icon)) {
+    return icon;
+  }
+  return 'apps';
+}
+
+/**
+ * Estilo do contêiner do ícone, compartilhado entre Cards e Barra de status.
+ * - contained: fundo vitrificado (glass) na mesma cor do ícone, em tom mais claro e translúcido.
+ * - clean: sem fundo.
+ */
+function getIconContainerStyle(
+  iconStyle: 'contained' | 'clean',
+  color: string,
+  size: number,
+  radius: number
+): React.CSSProperties {
+  const base: React.CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    color,
+  };
+
+  if (iconStyle !== 'contained') {
+    return { ...base, width: 'auto', height: 'auto', backgroundColor: 'transparent', border: 'none' };
+  }
+
+  return {
+    ...base,
+    width: `${size}px`,
+    height: `${size}px`,
+    borderRadius: `${radius}px`,
+    backgroundColor: `color-mix(in srgb, ${color} 20%, transparent)`,
+    border: `1px solid color-mix(in srgb, ${color} 30%, transparent)`,
+  };
 }
 
 // ─── Paleta de temas ───────────────────────────────────────────────────────
@@ -77,6 +118,24 @@ function formatFieldValue(raw: unknown, field: Field, theme: GrafanaTheme2): { t
   return { text: formattedValueToString(display), color: display.color };
 }
 
+function getExceededColor(field: Field | undefined, displayColor: string | undefined, theme: GrafanaTheme2): string | undefined {
+  if (!field || !displayColor) return undefined;
+  const steps = field.config?.thresholds?.steps;
+  if (!steps || steps.length === 0) return undefined;
+  
+  // O Grafana garante que o passo base é sempre o primeiro na configuração padrão
+  const baseColor = steps[0]?.color;
+  if (!baseColor) return displayColor;
+
+  const resolvedDisplay = resolveColor(theme, displayColor, displayColor);
+  const resolvedBase = resolveColor(theme, baseColor, baseColor);
+
+  if (resolvedDisplay.toLowerCase() === resolvedBase.toLowerCase()) {
+    return undefined; // Não ultrapassou (está no limiar seguro)
+  }
+  return displayColor;
+}
+
 function isHealthy(value: unknown): boolean {
   if (typeof value === 'number') {
     return value > 0;
@@ -93,6 +152,9 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
   const valueTextColor = theme.isDark ? '#f4f6fb' : theme.colors.text.primary;
 
   const isVertical = options.layoutOrientation === 'vertical';
+  // Aceita tanto '26' quanto '26px' (o padrão do painel já inclui a unidade)
+  const rawFontSize = String(options.valueFontSize ?? '26');
+  const valueFontSize = rawFontSize.trim() !== '' && !isNaN(Number(rawFontSize)) ? `${rawFontSize}px` : rawFontSize;
 
   return {
     container: css`
@@ -107,6 +169,33 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       justify-content: flex-start;
       padding: 8px;
     `,
+    containerGrouped: css`
+      display: flex;
+      flex-direction: ${isVertical ? 'column' : 'row'};
+      flex-wrap: ${isVertical ? 'nowrap' : 'wrap'};
+      gap: ${bounded(options.gap, 16, 0, 100)}px;
+      box-sizing: border-box;
+      overflow-x: auto;
+      overflow-y: auto;
+      align-items: stretch;
+      justify-content: flex-start;
+      background-color: ${baseBg};
+      background-image: linear-gradient(180deg, ${accent}12 0%, ${accent}02 100%);
+      border: 1px solid ${borderColor};
+      border-radius: ${bounded(options.borderRadius, 12, 0, 100)}px;
+      padding: ${bounded(options.cardPadding, 16, 0, 100)}px;
+      position: relative;
+      
+      &::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(180deg, rgba(255,255,255,0.02) 0%, rgba(0,0,0,0.15) 100%);
+        pointer-events: none;
+        border-radius: inherit;
+        z-index: 2;
+      }
+    `,
     card: css`
       position: relative;
       display: flex;
@@ -116,6 +205,7 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       box-sizing: border-box;
       border-radius: ${bounded(options.borderRadius, 12, 0, 100)}px;
       background-color: ${baseBg};
+      background-image: linear-gradient(180deg, ${accent}12 0%, ${accent}02 100%);
       border: 1px solid ${borderColor};
       overflow: hidden;
       font-family: ${theme.typography.fontFamily};
@@ -129,16 +219,29 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
         content: '';
         position: absolute;
         inset: 0;
-        background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(0, 0, 0, 0.1) 100%);
+        background: linear-gradient(180deg, rgba(255,255,255,0.02) 0%, rgba(0,0,0,0.15) 100%);
         pointer-events: none;
         border-radius: inherit;
         z-index: 2;
       }
     `,
+    cardGrouped: css`
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 ${isVertical ? 'auto' : '300px'};
+      min-width: min(100%, ${bounded(options.minCardWidth, 250, 80, 1000)}px);
+      box-sizing: border-box;
+      background-color: transparent;
+      border: none;
+      font-family: ${theme.typography.fontFamily};
+      justify-content: center;
+      z-index: 3;
+    `,
     header: css`
       display: flex;
       align-items: center;
-      gap: ${theme.spacing(1.5)};
+      gap: ${theme.spacing(1)};
       z-index: 3;
       margin-bottom: ${options.showValue ? theme.spacing(1.5) : 0};
     `,
@@ -146,25 +249,45 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       display: flex;
       align-items: center;
       justify-content: center;
-      width: 28px;
-      height: 28px;
+      width: 26px;
+      height: 26px;
       border-radius: 8px;
       flex-shrink: 0;
-      svg {
-        width: 14px;
-        height: 14px;
-      }
+      svg { width: 14px; height: 14px; }
+    `,
+    iconClean: css`
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      svg { width: 18px; height: 18px; }
+    `,
+    iconWrapStatusBar: css`
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      height: 44px;
+      border-radius: 10px;
+      flex-shrink: 0;
+    `,
+    titleInfo: css`
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: ${theme.spacing(0.5)} ${theme.spacing(1.5)};
+      flex: 1;
+      min-width: 0;
     `,
     label: css`
       font-size: ${theme.typography.bodySmall.fontSize};
-      letter-spacing: 0.05em;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
       color: ${labelColor};
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      flex: 1;
-      min-width: 0;
+      max-width: 100%;
       font-weight: ${theme.typography.fontWeightMedium};
     `,
     valueWrap: css`
@@ -173,7 +296,7 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       z-index: 3;
     `,
     value: css`
-      font-size: ${options.valueFontSize}px;
+      font-size: ${valueFontSize};
       font-weight: ${theme.typography.fontWeightBold};
       color: ${valueTextColor};
       line-height: 1.1;
@@ -182,7 +305,7 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
     `,
     statusBar: css`
       display: flex;
-      align-items: stretch;
+      align-items: center;
       justify-content: space-between;
       gap: ${theme.spacing(3)};
       width: 100%;
@@ -251,10 +374,10 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
     health: css`
       display: flex;
       align-items: center;
-      padding: 4px 8px;
+      padding: 2px 6px;
       border-radius: 6px;
       color: #fff;
-      font-size: ${theme.typography.bodySmall.fontSize};
+      font-size: 11px;
       font-weight: ${theme.typography.fontWeightMedium};
       white-space: nowrap;
     `,
@@ -285,16 +408,20 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
 // ─── Componente principal ──────────────────────────────────────────────────
 export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fieldConfig, id, replaceVariables }) => {
   const theme = useTheme2();
-  const { accent } = THEME_COLORS[options.theme] ?? THEME_COLORS.vale;
+  const accent = resolveColor(theme, options.defaultColor);
   const styles = useStyles2((t) => getStyles(t, accent, options));
 
-  const statusBar = options.displayMode === 'statusBar';
+  const statusBar = options.viewMode === 'status_bar' || options.displayMode === 'statusBar';
   const metrics = useMemo(
     () => selectMetrics(data.series, statusBar ? { ...options, metricMode: 'configured' } : options),
     [data.series, options, statusBar]
   );
   const availableMetrics = useMemo(() => listMetrics(data.series), [data.series]);
   const grouped = options.cardLayout === 'grouped';
+
+  if (options.displayMode === 'nestedGroups') {
+    return <NestedGroupPanel {...{ options, data, width, height, fieldConfig, id, replaceVariables } as any} />;
+  }
 
   if (metrics.length === 0 && !statusBar) {
     return options.metricMode === 'configured' ? (
@@ -310,13 +437,14 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
     const raw = metric?.field.values.length ? metric.field.values[metric.field.values.length - 1] : undefined;
     const healthy = raw === undefined ? undefined : isHealthy(raw);
     const display = metric?.field ? formatFieldValue(raw, metric.field, theme) : undefined;
-    const customCfg = metric?.field?.config?.custom || {};
-    const useThreshold = customCfg.useThreshold ?? false;
+    const useThreshold = options.badgesFollowThreshold ?? false;
     const finalLabel = label || metric?.label || source?.fieldName || 'STATUS';
+    const exceededColor = getExceededColor(metric?.field, display?.color, theme);
+    
     return {
       label: finalLabel,
       text: healthy === undefined ? 'SEM DADOS' : display?.text || (healthy ? healthyLabel : unhealthyLabel),
-      color: useThreshold && display?.color ? display.color : accent,
+      color: useThreshold && exceededColor ? exceededColor : accent,
     };
   };
 
@@ -353,12 +481,18 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
     ].filter((m) => m.source);
 
 
+    // Ícone do host: usa as opções globais; com 'seguir threshold', acompanha a cor do primeiro indicador
+    const hostIconName = resolveCardIconName(options.defaultIcon || 'server');
+    const hostIconStyle = options.iconStyle || 'contained';
+    const hostIconColor =
+      options.iconFollowThreshold && statuses.length > 0 ? resolveColor(theme, statuses[0].color, accent) : accent;
+
     return (
       <div className={styles.statusBar} style={{ width, height, flexWrap: 'nowrap' }}>
         <div className={styles.identity}>
           {options.showIcon !== false && (
-            <div className={styles.iconWrap} style={{ color: accent, backgroundColor: `${accent}25` }}>
-              <Icon name={resolveIconName(options.icon) as any} size="sm" />
+            <div className={styles.iconWrapStatusBar} style={getIconContainerStyle(hostIconStyle, hostIconColor, 44, 10)}>
+              <Icon name={hostIconName} size="xl" />
             </div>
           )}
           <div className={styles.identityText}>
@@ -386,24 +520,35 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
             {subtitle && <div className={styles.identitySubtitle}>{subtitle}</div>}
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'stretch', alignContent: 'center', gap: theme.spacing(5), flex: '0 1 auto', flexWrap: 'nowrap', justifyContent: 'flex-end', marginLeft: 'auto' }}>
+        <div style={{ display: 'flex', alignItems: 'center', alignContent: 'center', gap: theme.spacing(5), flex: '0 1 auto', flexWrap: 'nowrap', justifyContent: 'flex-end', marginLeft: 'auto' }}>
           {fixedMetricsConfig.map((config) => {
             const metric = availableMetrics.find((item) => sourceKey(item.source) === sourceKey(config.source));
             const field = metric?.field;
             const lastValue = field && field.values.length ? field.values[field.values.length - 1] : null;
             const display = field ? formatFieldValue(lastValue, field, theme) : { text: '—', color: undefined };
             const label = config.label || metric?.label || config.source?.fieldName || 'Métrica';
-            const customCfg = field?.config?.custom || {};
-            const useThreshold = customCfg.useThreshold ?? false;
+            const customCfg = (field?.config?.custom as CustomFieldConfig) || {};
+            const useThreshold = options.metricsFollowThreshold ?? false;
             const shouldShowIcon = customCfg?.showIcon ?? options.showIcon ?? true;
-            const iconName = resolveIconName(customCfg?.icon || options.icon);
+            const iconName = resolveCardIconName(customCfg.icon || options.defaultIcon || 'server');
+            const iconStyle = customCfg.iconStyle || options.iconStyle || 'contained';
+            const iconFollowThreshold = customCfg.iconFollowThreshold === 'auto' || customCfg.iconFollowThreshold === undefined 
+              ? (options.iconFollowThreshold ?? false) 
+              : customCfg.iconFollowThreshold;
+            
+            const exceededColor = getExceededColor(field, display.color, theme);
+            const iconColor = iconFollowThreshold && exceededColor ? resolveColor(theme, exceededColor, accent) : accent;
             return (
               <div className={styles.metricCompact} key={config.id}>
-                <span className={styles.metricCompactLabel}>
-                  {shouldShowIcon !== false && <Icon name={iconName as any} size="xs" style={{ marginRight: 4, color: useThreshold && display.color ? display.color : accent }} />}
+                <span className={styles.metricCompactLabel} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {shouldShowIcon !== false && (
+                    <span style={getIconContainerStyle(iconStyle, iconColor, 22, 6)}>
+                      <Icon name={iconName} size="xs" />
+                    </span>
+                  )}
                   {label}
                 </span>
-                <span className={styles.metricCompactValue} style={{ color: useThreshold ? display.color : undefined }}>
+                <span className={styles.metricCompactValue} style={{ color: useThreshold && exceededColor ? exceededColor : undefined }}>
                   {display.text}
                 </span>
               </div>
@@ -414,126 +559,224 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
     );
   }
 
+  // Um único item: layout horizontal dedicado
+  const singleCard = metrics.length === 1;
+
+  if (!singleCard) {
+    const groupedFields: Record<string, import('@grafana/data').Field[]> = {};
+    metrics.forEach(({ metric }) => {
+      if (!metric || !metric.field) return;
+      const field = metric.field;
+      const groupKey = field.labels ? (field.labels['host'] || field.labels['name'] || field.labels['interface'] || field.name) : field.name;
+      if (!groupedFields[groupKey]) {
+        groupedFields[groupKey] = [];
+      }
+      groupedFields[groupKey].push(field);
+    });
+
+    return (
+      <div style={{
+        width: '100%',
+        height: '100%',
+        overflowY: 'auto',
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+        gap: '16px',
+        padding: '8px',
+        boxSizing: 'border-box'
+      }}>
+        {Object.entries(groupedFields).map(([groupName, groupFields], idx) => {
+          // Determina a cor base do Macro-Card usando o primeiro field do grupo como referência principal
+          const mainField = groupFields[0];
+          const rawVal = mainField.values.length ? mainField.values[mainField.values.length - 1] : undefined;
+          const displayResult = mainField.display ? mainField.display(rawVal) : { color: options.defaultColor || '#32D1A7' };
+          
+          let cardColor = options.defaultColor || '#32D1A7';
+          if (displayResult.color) {
+            try { cardColor = theme.visualization.getColorByName(displayResult.color); }
+            catch (e) { cardColor = displayResult.color; }
+          }
+
+          return (
+            <div key={idx} style={{
+              backgroundColor: 'rgba(15, 23, 42, 0.4)', // Fundo escuro azulado estilo painel NOC
+              border: `1px solid color-mix(in srgb, ${cardColor} 40%, transparent)`,
+              boxShadow: `inset 0 0 20px color-mix(in srgb, ${cardColor} 10%, transparent)`,
+              borderRadius: '8px',
+              padding: '16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '16px'
+            }}>
+              {/* Header Base (Será refinado e estruturado no Passo 3.2) */}
+              <div style={{ color: '#fff', fontSize: '16px', fontWeight: 700, borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '8px' }}>
+                {groupName}
+              </div>
+
+              {/* Sub-métricas Base (Serão refinadas na malha de blocos no Passo 3.3) */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                 {groupFields.map((f, i) => (
+                   <div key={i} style={{ color: '#9CA3AF', fontSize: '12px' }}>{f.name}</div>
+                 ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
   return (
     <div
       className={cx(
-        styles.container,
+        grouped ? styles.containerGrouped : styles.container,
         css`
           width: ${width}px;
           height: ${height}px;
+          box-sizing: border-box;
+          overflow: hidden;
+          padding: 0;
         `
       )}
-      style={
-        grouped
-          ? {
-              background: theme.colors.background.secondary,
-              border: `1px solid ${theme.colors.border.weak}`,
-              borderRadius: bounded(options.borderRadius, 12, 0, 100),
-              padding: bounded(options.cardPadding, 16, 0, 100),
-            }
-          : undefined
-      }
     >
       {metrics.map(({ config, metric }) => {
         const field = metric?.field;
         const lastValue = field && field.values.length ? field.values[field.values.length - 1] : null;
         const display = field ? formatFieldValue(lastValue, field, theme) : { text: '—', color: undefined };
-        const fieldName = config.label || metric?.label || config.source?.fieldName || 'Selecione um campo';
         const customCfg = field?.config.custom;
-        const iconName = resolveIconName(config.icon || customCfg?.icon || options.icon);
-        const horizontal = config.horizontalAlign ?? options.horizontalAlign ?? 'left';
-        const vertical = config.verticalAlign ?? options.verticalAlign ?? 'center';
+        const custom = (field?.config?.custom as CustomFieldConfig) || {};
+        const fieldName = custom.label || config.label || metric?.label || config.source?.fieldName || 'Selecione um campo';
+        const iconName = resolveCardIconName(custom.icon || config.icon || options.defaultIcon || 'server');
+        const iconStyle = custom.iconStyle || options.iconStyle || 'contained';
+        const iconFollowThreshold = custom.iconFollowThreshold === 'auto' || custom.iconFollowThreshold === undefined 
+          ? (options.iconFollowThreshold ?? false)
+          : custom.iconFollowThreshold;
+        const horizontal = (config.horizontalAlign ?? options.horizontalAlign ?? 'left') as 'left' | 'center' | 'right';
+        const vertical = (config.verticalAlign ?? options.verticalAlign ?? 'center') as 'top' | 'center' | 'bottom';
         const align = { left: 'flex-start', center: 'center', right: 'flex-end' }[horizontal];
         const justify = { top: 'flex-start', center: 'center', bottom: 'flex-end' }[vertical];
         const badge = config.badgeMode === 'value' ? display.text : config.badgeMode === 'text' ? config.badgeText : '';
 
-        const useThreshold = customCfg.useThreshold ?? false;
-        const colorMode = customCfg.colorMode ?? 'text';
+        const useThreshold = customCfg?.useThreshold ?? (options.useThreshold ?? false);
+        const colorMode = customCfg?.colorMode ?? (options.colorMode ?? 'text');
 
         let bgColor = '';
         let borderColor = '';
-        let textColor = '';
-        let iconColor = accent;
+        
+        const exceededColor = getExceededColor(field, display.color, theme);
+        const metricColor = exceededColor ? resolveColor(theme, exceededColor, accent) : accent;
+        const textColor = metricColor;
+        const iconColor = iconFollowThreshold ? metricColor : accent;
 
-        // Aplica a lógica de cores
-        if (useThreshold && display.color) {
-          if (colorMode === 'background') {
-            bgColor = `${display.color}15`; // Fundo com 15% de opacidade
-            borderColor = `${display.color}40`; // Borda com 40% de opacidade
-            textColor = display.color;
-            iconColor = display.color;
-          } else {
-            // Apenas texto
-            textColor = display.color;
-            iconColor = display.color;
-          }
+        if (useThreshold && colorMode === 'background' && exceededColor) {
+          bgColor = `color-mix(in srgb, ${metricColor} 15%, transparent)`;
+          borderColor = `color-mix(in srgb, ${metricColor} 40%, transparent)`;
         }
 
+        const showCardIcon = (customCfg?.showIcon ?? config.showIcon ?? options.showIcon) !== false;
+
+        // ── Card único: layout horizontal (ícone + título à esquerda, valor à direita) ──
         return (
           <div
-            key={config.id}
-            className={styles.card}
-            style={{
-              backgroundColor: bgColor || undefined,
-              borderColor: borderColor || undefined,
-              justifyContent: justify,
-              textAlign: horizontal,
-              ...(grouped
-                ? { backgroundColor: bgColor || 'transparent', border: 'none', borderRadius: 0, padding: 0 }
-                : {}),
-            }}
-          >
-            <div className={styles.header} style={{ justifyContent: align }}>
-              {(customCfg?.showIcon ?? config.showIcon ?? options.showIcon) !== false && (
-                <div
-                  className={styles.iconWrap}
-                  style={{
-                    color: iconColor,
-                    backgroundColor: `${iconColor}25`,
-                  }}
-                >
-                  <Icon name={iconName as any} size="sm" />
-                </div>
-              )}
-              {options.showLabel !== false && (
-                <div
-                  className={styles.label}
-                  style={{
-                    color: colorMode === 'background' ? textColor : undefined,
-                    flex: horizontal === 'left' ? 1 : '0 1 auto',
-                  }}
-                >
-                  {fieldName}
-                </div>
-              )}
-            </div>
-            {options.showValue !== false && (
-              <div className={styles.valueWrap} style={{ justifyContent: align }}>
-                <span className={styles.value} style={{ color: textColor || undefined }}>
-                  {display.text ?? '—'}
-                </span>
-              </div>
-            )}
-            {badge && (
-              <span
+              key={config.id}
+              className={grouped ? styles.cardGrouped : styles.card}
+              style={{
+                backgroundColor: bgColor || undefined,
+                borderColor: borderColor || undefined,
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flex: '1 1 auto',
+                width: '100%',
+                height: '100%',
+                boxSizing: 'border-box',
+                overflow: 'hidden',
+                margin: 0,
+                minWidth: 0,
+              }}
+            >
+              <div
                 style={{
-                  alignSelf: align,
-                  position: 'relative',
-                  zIndex: 3,
-                  marginTop: 8,
-                  padding: '2px 8px',
-                  borderRadius: 999,
-                  border: '1px solid currentColor',
-                  color: useThreshold && display.color ? display.color : accent,
-                  maxWidth: '100%',
-                  overflowWrap: 'anywhere',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px',
+                  minWidth: 0,
+                  overflow: 'hidden',
                 }}
               >
-                {badge}
-              </span>
-            )}
-            {!metric && <span role="status">Campo indisponível</span>}
-          </div>
+                {showCardIcon && (
+                  <div 
+                    className={iconStyle === 'clean' ? styles.iconClean : styles.iconWrap} 
+                    style={{ 
+                      color: iconColor, 
+                      backgroundColor: iconStyle === 'clean' ? 'transparent' : `color-mix(in srgb, ${iconColor} 20%, transparent)`,
+                      border: iconStyle === 'clean' ? 'none' : `1px solid color-mix(in srgb, ${iconColor} 30%, transparent)`
+                    }}
+                  >
+                    <Icon name={iconName} size={iconStyle === 'clean' ? 'lg' : 'sm'} />
+                  </div>
+                )}
+                {options.showLabel !== false && (
+                  <div
+                    style={{
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      minWidth: 0,
+                      fontSize: '13px',
+                      fontWeight: 600,
+                      color: '#D1D5DB',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.5px'
+                    }}
+                  >
+                    {fieldName}
+                  </div>
+                )}
+              </div>
+              
+              {(options.showValue !== false || badge) && (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'flex-end',
+                    flexShrink: 0,
+                    marginLeft: '16px',
+                    zIndex: 3,
+                  }}
+                >
+                  {options.showValue !== false && (
+                    <span 
+                      style={{ 
+                        color: textColor, 
+                        whiteSpace: 'nowrap',
+                        fontSize: options.valueFontSize || '24px',
+                        fontWeight: 700,
+                      }}
+                    >
+                      {display.text ?? '—'}
+                    </span>
+                  )}
+                  {badge && (
+                    <span
+                      style={{
+                        marginTop: 6,
+                        padding: '2px 8px',
+                        borderRadius: 999,
+                        border: '1px solid currentColor',
+                        color: metricColor,
+                        maxWidth: '100%',
+                        overflowWrap: 'anywhere',
+                      }}
+                    >
+                      {badge}
+                    </span>
+                  )}
+                </div>
+              )}
+              {!metric && <span role="status">Campo indisponível</span>}
+            </div>
         );
       })}
     </div>
