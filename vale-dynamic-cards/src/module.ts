@@ -105,9 +105,8 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
     },
   })
   .setPanelOptions((builder) => {
-    return (
-      builder
-        .addRadio({
+    builder
+      .addRadio({
           path: 'viewMode',
           name: 'Modo de exibição',
           defaultValue: 'status_bar',
@@ -116,6 +115,7 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
             options: [
               { value: 'status_bar', label: 'Barra de status' },
               { value: 'card', label: 'Card' },
+              { value: 'macro_cards', label: 'Macro-Cards (NOC)' },
             ],
           },
         })
@@ -137,6 +137,55 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
               { value: 'clean', label: 'Livre (Sem Fundo)' },
             ],
           },
+        })
+        .addTextInput({
+          path: 'macroCardsLabel',
+          name: 'Rótulo do Agrupamento',
+          description: 'Texto exibido no fundo do painel inteiro',
+          defaultValue: 'VISÃO GERAL NOC',
+          category: ['Macro-Cards'],
+          showIf: (o) => o.viewMode === 'macro_cards',
+        })
+        .addNumberInput({
+          path: 'macroCardsCount',
+          name: 'Quantidade de Cards Pais',
+          description: 'Define quantos Cards Pais serão exibidos (1 a 4)',
+          defaultValue: 1,
+          category: ['Macro-Cards'],
+          settings: { min: 1, max: 4, integer: true },
+          showIf: (o) => o.viewMode === 'macro_cards',
+        })
+        .addRadio({
+          path: 'parentThresholdTarget',
+          name: 'Alerta no Card Pai',
+          description: 'O que deve mudar de cor ao entrar em alerta?',
+          category: ['Macro-Cards'],
+          defaultValue: 'both',
+          settings: {
+            options: [
+              { value: 'none', label: 'Nenhum' },
+              { value: 'icon', label: 'Ícone' },
+              { value: 'background', label: 'Fundo' },
+              { value: 'both', label: 'Ambos' },
+            ],
+          },
+          showIf: (o) => o.viewMode === 'macro_cards',
+        })
+        .addRadio({
+          path: 'childThresholdTarget',
+          name: 'Alerta no Card Filho',
+          description: 'O que deve mudar de cor ao entrar em alerta?',
+          category: ['Macro-Cards'],
+          defaultValue: 'value',
+          settings: {
+            options: [
+              { value: 'none', label: 'Nenhum' },
+              { value: 'value', label: 'Valor' },
+              { value: 'background', label: 'Fundo' },
+              { value: 'both', label: 'Ambos' },
+            ],
+          },
+          showIf: (o) => o.viewMode === 'macro_cards',
         })
         .addBooleanSwitch({
           path: 'iconFollowThreshold',
@@ -328,6 +377,66 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
           defaultValue: '26px',
           category: ['Exibição'],
           showIf: (o) => o.viewMode === 'card',
+        });
+
+    const MAX_MACRO_CARDS = 4;
+    for (let i = 1; i <= MAX_MACRO_CARDS; i++) {
+      builder
+        .addTextInput({
+          path: `mc${i}_title`,
+          name: `Card Pai ${i} - Título`,
+          category: [`Card Pai ${i}`],
+          showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i,
         })
-    );
+        .addTextInput({
+          path: `mc${i}_subtitle`,
+          name: `Card Pai ${i} - Subtítulo`,
+          category: [`Card Pai ${i}`],
+          showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i,
+        })
+        .addSelect({
+          path: `mc${i}_icon`,
+          name: `Card Pai ${i} - Ícone Principal`,
+          defaultValue: 'server',
+          category: [`Card Pai ${i}`],
+          settings: { options: ICON_OPTIONS },
+          showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i,
+        })
+        .addCustomEditor({
+          id: `mc${i}_statusSource`,
+          path: `mc${i}_statusSource`,
+          name: `Card Pai ${i} - Métrica de Status Global`,
+          description: 'Métrica usada para determinar a cor do card.',
+          editor: MetricSelectorEditor,
+          category: [`Card Pai ${i}`],
+          showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i,
+        })
+        .addBooleanSwitch({
+          path: `mc${i}_showThirdRow`,
+          name: `Mostrar 3ª linha (Métricas 6, 7 e 8)`,
+          category: [`Card Pai ${i} - Métricas`],
+          defaultValue: true,
+          showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i,
+        });
+
+      for (let j = 1; j <= 8; j++) {
+        builder
+          .addTextInput({
+            path: `mc${i}_child${j}_label`,
+            name: `Filho ${j} - Rótulo`,
+            category: [`Card Pai ${i} - Métricas`],
+            showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i && (j <= 5 || o[`mc${i}_showThirdRow`] !== false),
+          })
+          .addCustomEditor({
+            id: `mc${i}_child${j}_source`,
+            path: `mc${i}_child${j}_source`,
+            name: `Filho ${j} - Métrica`,
+            editor: MetricSelectorEditor,
+            category: [`Card Pai ${i} - Métricas`],
+            showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i && (j <= 5 || o[`mc${i}_showThirdRow`] !== false),
+          });
+      }
+    }
+
+    return builder;
   });

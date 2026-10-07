@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react';
 import { PanelProps, Field, formattedValueToString, GrafanaTheme2, getDisplayProcessor, isIconName } from '@grafana/data';
 import { SimpleOptions, CardTheme, MetricSource, CustomFieldConfig } from '../types';
-import { bounded, listMetrics, selectMetrics, sourceKey } from '../metrics';
+import { bounded, listMetrics, selectMetrics, sourceKey, matchMetric } from '../metrics';
 import { css, cx } from '@emotion/css';
 import { useStyles2, Icon, IconName, useTheme2 } from '@grafana/ui';
 import { PanelDataErrorView } from '@grafana/runtime';
@@ -238,6 +238,13 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       justify-content: center;
       z-index: 3;
     `,
+    textEllipsis: css`
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: block;
+      width: 100%;
+    `,
     header: css`
       display: flex;
       align-items: center;
@@ -402,6 +409,157 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       font-weight: ${theme.typography.fontWeightBold};
       margin-top: 2px;
     `,
+    avoContainer: css`
+      flex-grow: 1;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      box-sizing: border-box;
+      overflow: hidden;
+      background-color: ${theme.isDark ? '#0c101b' : theme.colors.background.primary};
+      background-image: linear-gradient(180deg, ${accent}12 0%, ${accent}02 100%);
+      border-radius: 12px;
+      padding: ${theme.spacing(1)} ${theme.spacing(2)} ${theme.spacing(1.5)};
+      position: relative;
+      
+      &::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(180deg, rgba(255,255,255,0.02) 0%, rgba(0,0,0,0.15) 100%);
+        pointer-events: none;
+        border-radius: 11px;
+        z-index: 2;
+      }
+      
+      > * {
+        position: relative;
+        z-index: 3;
+      }
+    `,
+    avoHeader: css`
+      color: ${labelColor};
+      font-weight: ${theme.typography.fontWeightBold};
+      font-size: ${theme.typography.bodySmall.fontSize};
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: ${theme.spacing(1)};
+      display: flex;
+      align-items: center;
+      gap: ${theme.spacing(1)};
+    `,
+    gridPais: css`
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: ${theme.spacing(1.5)};
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      overflow: hidden;
+      background-color: transparent;
+      align-items: stretch;
+      justify-items: stretch;
+    `,
+    paiCard: css`
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      border-radius: 12px;
+      padding: ${theme.spacing(1.5)};
+      background-color: rgba(15, 23, 42, 0.4);
+      background-image: linear-gradient(180deg, rgba(255,255,255,0.02) 0%, rgba(0,0,0,0.1) 100%);
+      overflow: hidden;
+      font-family: ${theme.typography.fontFamily};
+      gap: ${theme.spacing(1)};
+      transition: all 0.3s ease;
+      outline: none !important;
+    `,
+    paiHeader: css`
+      display: flex;
+      align-items: center;
+      gap: ${theme.spacing(1)};
+      z-index: 3;
+    `,
+    paiTitleWrap: css`
+      display: flex;
+      flex-direction: row;
+      align-items: baseline;
+      gap: ${theme.spacing(1)};
+      flex: 1;
+      min-width: 0;
+    `,
+    paiTitle: css`
+      color: ${valueTextColor};
+      font-size: ${theme.typography.body.fontSize};
+      font-weight: ${theme.typography.fontWeightBold};
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    `,
+    paiSubtitle: css`
+      color: ${labelColor};
+      font-size: ${theme.typography.bodySmall.fontSize};
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    `,
+    paiStatusBadge: css`
+      display: flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 8px;
+      font-size: 10px;
+      font-weight: ${theme.typography.fontWeightBold};
+      text-transform: uppercase;
+      flex-shrink: 0;
+      z-index: 3;
+    `,
+    filhosGrid: css`
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+      margin-top: 16px;
+      flex-grow: 1;
+      align-content: start;
+      align-items: start;
+    `,
+    filhoCard: css`
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      background-color: rgba(255, 255, 255, 0.03);
+      border-radius: 6px;
+      padding: ${theme.spacing(1)};
+      overflow: hidden;
+      z-index: 3;
+      min-height: 64px;
+    `,
+    filhoDestaque: css`
+      grid-column: span 3;
+    `,
+    filhoNormal: css`
+      grid-column: span 2;
+    `,
+    filhoLabel: css`
+      color: ${labelColor};
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    `,
+    filhoValueDestaque: css`
+      color: ${valueTextColor};
+      font-size: 20px;
+      font-weight: ${theme.typography.fontWeightBold};
+      margin-top: 4px;
+    `,
+    filhoValueNormal: css`
+      color: ${valueTextColor};
+      font-size: 14px;
+      font-weight: ${theme.typography.fontWeightBold};
+      margin-top: 4px;
+    `,
   };
 };
 
@@ -433,7 +591,7 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
 
   const resolveTemplate = (value?: string) => (value ? replaceVariables?.(value) ?? value : '');
   const resolveStatus = (source: MetricSource | undefined, label: string | undefined, healthyLabel: string, unhealthyLabel: string) => {
-    const metric = availableMetrics.find((item) => sourceKey(item.source) === sourceKey(source));
+    const metric = matchMetric(availableMetrics, source);
     const raw = metric?.field.values.length ? metric.field.values[metric.field.values.length - 1] : undefined;
     const healthy = raw === undefined ? undefined : isHealthy(raw);
     const display = metric?.field ? formatFieldValue(raw, metric.field, theme) : undefined;
@@ -447,6 +605,176 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
       color: useThreshold && exceededColor ? exceededColor : accent,
     };
   };
+
+  const extractMetricDisplay = (source: MetricSource | undefined) => {
+    if (!source) return { text: '-', color: theme.colors.text.disabled };
+    const metric = matchMetric(availableMetrics, source);
+    if (!metric?.field) return { text: '-', color: theme.colors.text.disabled };
+    
+    const raw = metric.field.values.length ? metric.field.values[metric.field.values.length - 1] : undefined;
+    if (raw === undefined || raw === null) return { text: 'N/A', color: theme.colors.text.secondary };
+    
+    const display = formatFieldValue(raw, metric.field, theme);
+    const thresholdColor = display.color ? resolveColor(theme, display.color, theme.colors.text.primary) : theme.colors.text.primary;
+    
+    return {
+      text: display.text,
+      color: thresholdColor,
+    };
+  };
+
+  const macroCardsConfig = useMemo(() => {
+    if (options.viewMode !== 'macro_cards') return [];
+    const count = options.macroCardsCount ?? 1;
+    const cards = [];
+    for (let i = 1; i <= count; i++) {
+      const title = options[`mc${i}_title`] || `Card Pai ${i}`;
+      const subtitle = options[`mc${i}_subtitle`] || '';
+      const icon = options[`mc${i}_icon`] || 'server';
+      
+      const source = options[`mc${i}_statusSource`] as MetricSource | undefined;
+      const metric = availableMetrics.find((item) => sourceKey(item.source) === sourceKey(source));
+      
+      let statusColor = DEFAULT_COLOR;
+      let statusText = 'SEM DADOS';
+      
+      if (metric?.field) {
+        const raw = metric.field.values.length ? metric.field.values[metric.field.values.length - 1] : undefined;
+        const healthy = raw === undefined ? undefined : isHealthy(raw);
+        const display = formatFieldValue(raw, metric.field, theme);
+        const exceededColor = getExceededColor(metric.field, display.color, theme);
+        
+        statusColor = exceededColor || display.color || DEFAULT_COLOR;
+        statusText = display.text || (healthy ? 'NORMAL' : 'ALERTA');
+      }
+
+      const children = [];
+      const showThirdRow = options[`mc${i}_showThirdRow`] !== false;
+      const childrenCount = showThirdRow ? 8 : 5;
+      
+      for (let j = 1; j <= childrenCount; j++) {
+        const childLabel = options[`mc${i}_child${j}_label`];
+        const childSource = options[`mc${i}_child${j}_source`];
+        
+        const displayData = extractMetricDisplay(childSource as MetricSource | undefined);
+        const childMetric = availableMetrics.find((item) => sourceKey(item.source) === sourceKey(childSource as MetricSource | undefined));
+        const defaultLabel = childMetric?.field.name || (childSource as MetricSource | undefined)?.fieldName || 'Sem Nome';
+        const finalLabel = childLabel || defaultLabel;
+        
+        children.push({
+          id: j,
+          label: replaceVariables ? replaceVariables(finalLabel) : finalLabel,
+          source: childSource,
+          hasConfig: !!(childLabel || childSource),
+          displayValue: displayData.text,
+          thresholdColor: displayData.color,
+        });
+      }
+
+      cards.push({
+        id: i,
+        title: replaceVariables ? replaceVariables(title) : title,
+        subtitle: replaceVariables ? replaceVariables(subtitle) : subtitle,
+        icon: resolveCardIconName(icon),
+        statusColor,
+        statusText,
+        children,
+      });
+    }
+    return cards;
+  }, [options, replaceVariables, availableMetrics, theme]);
+
+  if (options.viewMode === 'macro_cards') {
+    const macroLabel = resolveTemplate(options.macroCardsLabel) || 'VISÃO GERAL NOC';
+    const parentThresholdTarget = options.parentThresholdTarget || 'both';
+    const childThresholdTarget = options.childThresholdTarget || 'value';
+
+    return (
+      <div className={styles.avoContainer} style={{ width, height }}>
+        {macroLabel && <div className={styles.avoHeader}>{macroLabel}</div>}
+        <div className={styles.gridPais}>
+          {macroCardsConfig.map((card) => {
+            const applyParentBg = parentThresholdTarget === 'background' || parentThresholdTarget === 'both';
+            const applyParentIcon = parentThresholdTarget === 'icon' || parentThresholdTarget === 'both';
+            
+            const parentBgColor = applyParentBg ? card.statusColor : DEFAULT_COLOR;
+            const parentIconColor = applyParentIcon ? card.statusColor : DEFAULT_COLOR;
+            
+            return (
+              <div
+                key={card.id}
+                className={styles.paiCard}
+                style={applyParentBg ? {
+                  backgroundColor: `color-mix(in srgb, ${parentBgColor} 8%, transparent)`,
+                  boxShadow: `inset 0 0 10px color-mix(in srgb, ${parentBgColor} 15%, transparent)`,
+                  border: `1px solid color-mix(in srgb, ${parentBgColor} 20%, transparent)`,
+                  backgroundImage: 'none',
+                } : {}}
+              >
+                <div className={styles.paiHeader}>
+                  <div style={getIconContainerStyle('contained', parentIconColor, 28, 6)}>
+                    <Icon name={card.icon} size="sm" />
+                  </div>
+                  <div className={styles.paiTitleWrap}>
+                    <div className={cx(styles.paiTitle, styles.textEllipsis)}>{card.title}</div>
+                    {card.subtitle && <div className={cx(styles.paiSubtitle, styles.textEllipsis)}>{card.subtitle}</div>}
+                  </div>
+                  <div
+                    className={styles.paiStatusBadge}
+                    style={{
+                      backgroundColor: `color-mix(in srgb, ${card.statusColor} 15%, transparent)`,
+                      color: card.statusColor,
+                      border: `1px solid color-mix(in srgb, ${card.statusColor} 40%, transparent)`,
+                    }}
+                  >
+                    {card.statusText}
+                  </div>
+                </div>
+
+                <div className={styles.filhosGrid}>
+                  {card.children.map((child, idx) => {
+                    const isDestaque = idx < 2;
+                    const cardStyle = cx(styles.filhoCard, isDestaque ? styles.filhoDestaque : styles.filhoNormal);
+
+                    if (!child.hasConfig) {
+                      return <div key={child.id} className={cardStyle} />;
+                    }
+
+                    const applyChildBg = childThresholdTarget === 'background' || childThresholdTarget === 'both';
+                    const applyChildValue = childThresholdTarget === 'value' || childThresholdTarget === 'both';
+
+                    const childBgColor = applyChildBg ? (child.thresholdColor || DEFAULT_COLOR) : DEFAULT_COLOR;
+                    const baseValueColor = theme.isDark ? '#f4f6fb' : theme.colors.text.primary;
+                    const childValueColor = applyChildValue ? (child.thresholdColor || baseValueColor) : baseValueColor;
+
+                    return (
+                      <div 
+                        key={child.id} 
+                        className={cardStyle}
+                        style={applyChildBg ? {
+                          backgroundColor: `color-mix(in srgb, ${childBgColor} 8%, transparent)`,
+                          boxShadow: `inset 0 0 10px color-mix(in srgb, ${childBgColor} 15%, transparent)`,
+                          border: `1px solid color-mix(in srgb, ${childBgColor} 20%, transparent)`,
+                        } : {}}
+                      >
+                        <div className={cx(styles.filhoLabel, styles.textEllipsis)} title={child.label}>{child.label}</div>
+                        <div 
+                          className={isDestaque ? styles.filhoValueDestaque : styles.filhoValueNormal}
+                          style={{ color: childValueColor }}
+                        >
+                          {child.displayValue}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
 
   if (statusBar) {
     const title = resolveTemplate(options.headerTitle) || 'Resumo do host';

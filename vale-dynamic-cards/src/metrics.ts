@@ -45,18 +45,31 @@ export function sourceKey(source?: MetricSource): string {
     : '';
 }
 
+export function matchMetric(available: AvailableMetric[], savedSource?: MetricSource): AvailableMetric | undefined {
+  if (!savedSource) return undefined;
+  
+  // 1. Exact match
+  const exact = available.find(item => sourceKey(item.source) === sourceKey(savedSource));
+  if (exact) return exact;
+
+  // 2. Resilient fallback: Match by refId and fieldName (ignores volatile frameNames like Prometheus labels)
+  return available.find(item => 
+    item.source.refId === savedSource.refId && 
+    item.source.fieldName === savedSource.fieldName
+  );
+}
+
 export function selectMetrics(
   frames: DataFrame[],
   options: SimpleOptions
 ): Array<{ config: MetricConfig; metric?: AvailableMetric }> {
   if (options.metricMode !== 'configured') {
-    // Modo automático: exibe todas as métricas de todos os frames (queries) retornados
     return listMetrics(frames).map((metric, i) => ({ config: { id: `auto-${i}` }, metric }));
   }
   const available = listMetrics(frames);
   return (options.metrics ?? []).map((config) => ({
     config,
-    metric: available.find((item) => sourceKey(item.source) === sourceKey(config.source)),
+    metric: matchMetric(available, config.source),
   }));
 }
 

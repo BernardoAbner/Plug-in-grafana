@@ -1,4 +1,4 @@
-export type ViewMode = 'status_bar' | 'card';
+export type ViewMode = 'status_bar' | 'card' | 'macro_cards';
 
 export interface MetricSource {
   refId?: string;
@@ -24,6 +24,12 @@ export interface DynamicCardOptions {
   iconStyle?: 'contained' | 'clean';
   iconFollowThreshold?: boolean;
   defaultColor?: string;
+
+  // Sprint 3: Macro-Cards
+  macroCardsCount: number;
+  macroCardsLabel?: string;
+  parentThresholdTarget?: 'none' | 'icon' | 'background' | 'both';
+  childThresholdTarget?: 'none' | 'value' | 'background' | 'both';
 
   // Opções de exibição do Card
   showIcon?: boolean;
