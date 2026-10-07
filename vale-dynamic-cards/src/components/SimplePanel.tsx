@@ -49,6 +49,30 @@ function resolveCardIconName(icon: string): IconName {
 }
 
 /**
+ * Calcula dinamicamente o span de colunas no grid de 6 colunas (Grid Assimétrico).
+ * Preenche 100% do espaço horizontal disponível da linha sem criar quebras indesejadas
+ * e sem esticar a altura vertical.
+ */
+function getChildGridSpan(idx: number, total: number): number {
+  if (idx < 2) {
+    // Linha 1 (máximo 2 destaques)
+    return total === 1 ? 6 : 3;
+  }
+  if (idx < 5) {
+    // Linha 2 (itens 3, 4, 5 -> idx 2, 3, 4)
+    const row2Count = Math.min(Math.max(total - 2, 0), 3);
+    if (row2Count === 1) return 6; // Ocupa 100% da linha 2
+    if (row2Count === 2) return 3; // Divide 50% / 50% na linha 2
+    return 2;                      // Divide 33.3% cada (2 colunas * 3 = 6)
+  }
+  // Linha 3 (itens 6, 7, 8 -> idx 5, 6, 7)
+  const row3Count = Math.min(Math.max(total - 5, 0), 3);
+  if (row3Count === 1) return 6;   // Ocupa 100% da linha 3
+  if (row3Count === 2) return 3;   // Divide 50% / 50% na linha 3
+  return 2;                        // Divide 33.3% cada
+}
+
+/**
  * Estilo do contêiner do ícone, compartilhado entre Cards e Barra de status.
  * - contained: fundo vitrificado (glass) na mesma cor do ícone, em tom mais claro e translúcido.
  * - clean: sem fundo.
@@ -420,7 +444,7 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       background-color: ${theme.isDark ? '#0c101b' : theme.colors.background.primary};
       background-image: linear-gradient(180deg, ${accent}12 0%, ${accent}02 100%);
       border-radius: 12px;
-      padding: ${theme.spacing(1)} ${theme.spacing(2)} ${theme.spacing(1.5)};
+      padding: ${theme.spacing(1)} ${theme.spacing(1.5)};
       position: relative;
       
       &::before {
@@ -438,6 +462,19 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
         z-index: 3;
       }
     `,
+    avoContainerSingle: css`
+      flex-grow: 1;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      box-sizing: border-box;
+      overflow: hidden;
+      background: transparent;
+      padding: 0;
+      position: relative;
+      border: none;
+    `,
     avoHeader: css`
       color: ${labelColor};
       font-weight: ${theme.typography.fontWeightBold};
@@ -451,8 +488,22 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
     `,
     gridPais: css`
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-      gap: ${theme.spacing(1.5)};
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+      gap: ${theme.spacing(1)};
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      overflow-y: auto;
+      overflow-x: hidden;
+      background-color: transparent;
+      align-content: start;
+      align-items: stretch;
+      justify-items: stretch;
+    `,
+    gridPaisSingle: css`
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0;
       width: 100%;
       height: 100%;
       box-sizing: border-box;
@@ -466,12 +517,12 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       display: flex;
       flex-direction: column;
       border-radius: 12px;
-      padding: ${theme.spacing(1.5)};
+      padding: ${theme.spacing(1)};
       background-color: rgba(15, 23, 42, 0.4);
       background-image: linear-gradient(180deg, rgba(255,255,255,0.02) 0%, rgba(0,0,0,0.1) 100%);
       overflow: hidden;
       font-family: ${theme.typography.fontFamily};
-      gap: ${theme.spacing(1)};
+      gap: ${theme.spacing(0.5)};
       transition: all 0.3s ease;
       outline: none !important;
     `,
@@ -518,11 +569,19 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
     filhosGrid: css`
       display: grid;
       grid-template-columns: repeat(6, 1fr);
-      gap: 8px;
-      margin-top: 16px;
-      flex-grow: 1;
+      gap: 6px;
+      margin-top: 6px;
       align-content: start;
-      align-items: start;
+      width: 100%;
+    `,
+    filhosGridSingle: css`
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: stretch;
+      width: 100%;
+      height: 100%;
+      margin-top: 0;
     `,
     filhoCard: css`
       display: flex;
@@ -530,10 +589,24 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       justify-content: space-between;
       background-color: rgba(255, 255, 255, 0.03);
       border-radius: 6px;
-      padding: ${theme.spacing(1)};
+      padding: ${theme.spacing(0.75)};
       overflow: hidden;
       z-index: 3;
-      min-height: 64px;
+      min-height: 48px;
+    `,
+    filhoCardSingle: css`
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: flex-start;
+      background-color: transparent;
+      border-radius: 0;
+      padding: 0;
+      min-height: 0;
+      height: 100%;
+      width: 100%;
+      overflow: hidden;
+      z-index: 3;
     `,
     filhoDestaque: css`
       grid-column: span 3;
@@ -550,15 +623,63 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
     `,
     filhoValueDestaque: css`
       color: ${valueTextColor};
-      font-size: 20px;
+      font-size: 18px;
       font-weight: ${theme.typography.fontWeightBold};
-      margin-top: 4px;
+      margin-top: 2px;
+      line-height: 1.2;
     `,
     filhoValueNormal: css`
       color: ${valueTextColor};
-      font-size: 14px;
+      font-size: 13px;
       font-weight: ${theme.typography.fontWeightBold};
-      margin-top: 4px;
+      margin-top: 2px;
+      line-height: 1.2;
+    `,
+    filhoValueSingle: css`
+      color: ${valueTextColor};
+      font-size: 24px;
+      font-weight: ${theme.typography.fontWeightBold};
+      margin-top: 2px;
+      line-height: 1.1;
+    `,
+    horizontalGrid: css`
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 6px;
+      align-items: stretch;
+      overflow: hidden;
+      height: 100%;
+      margin-top: 8px;
+      flex-grow: 1;
+    `,
+    horizontalChild: css`
+      flex: 1 1 auto;
+      min-width: 0;
+      container-type: inline-size;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      background-color: rgba(255, 255, 255, 0.03);
+      border-radius: 6px;
+      padding: ${theme.spacing(1)};
+      z-index: 3;
+    `,
+    horizontalLabel: css`
+      font-size: clamp(9px, 8cqi, 12px);
+      white-space: normal;
+      word-wrap: break-word;
+      line-height: 1.1;
+      text-align: center;
+      color: ${theme.colors.text.secondary};
+    `,
+    horizontalValue: css`
+      font-size: clamp(10px, 12cqi, 16px);
+      font-weight: bold;
+      white-space: normal;
+      word-wrap: break-word;
+      line-height: 1.1;
+      text-align: center;
     `,
   };
 };
@@ -575,13 +696,12 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
     [data.series, options, statusBar]
   );
   const availableMetrics = useMemo(() => listMetrics(data.series), [data.series]);
-  const grouped = options.cardLayout === 'grouped';
 
   if (options.displayMode === 'nestedGroups') {
     return <NestedGroupPanel {...{ options, data, width, height, fieldConfig, id, replaceVariables } as any} />;
   }
 
-  if (metrics.length === 0 && !statusBar) {
+  if (metrics.length === 0 && !statusBar && options.viewMode !== 'macro_cards' && (options.viewMode as string) !== 'card') {
     return options.metricMode === 'configured' ? (
       <div role="status">Adicione métricas nas opções do painel.</div>
     ) : (
@@ -624,13 +744,17 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
   };
 
   const macroCardsConfig = useMemo(() => {
-    if (options.viewMode !== 'macro_cards') return [];
-    const count = options.macroCardsCount ?? 1;
+    if (options.viewMode !== 'macro_cards' && (options.viewMode as string) !== 'card') return [];
+    
+    const limit = 5;
+    const count = Math.min(Math.max(options.macroCardsCount || 1, 1), limit);
+    
     const cards = [];
     for (let i = 1; i <= count; i++) {
       const title = options[`mc${i}_title`] || `Card Pai ${i}`;
       const subtitle = options[`mc${i}_subtitle`] || '';
       const icon = options[`mc${i}_icon`] || 'server';
+      const iconStyle = options[`mc${i}_iconStyle`] || 'contained';
       
       const source = options[`mc${i}_statusSource`] as MetricSource | undefined;
       const metric = availableMetrics.find((item) => sourceKey(item.source) === sourceKey(source));
@@ -649,8 +773,9 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
       }
 
       const children = [];
-      const showThirdRow = options[`mc${i}_showThirdRow`] !== false;
-      const childrenCount = showThirdRow ? 8 : 5;
+      const layoutType = options[`mc${i}_layoutType`] || 'grid';
+      const maxCount = options[`mc${i}_childrenCount`] ?? 5;
+      const childrenCount = layoutType === 'horizontal' ? Math.min(maxCount, 4) : maxCount;
       
       for (let j = 1; j <= childrenCount; j++) {
         const childLabel = options[`mc${i}_child${j}_label`];
@@ -658,7 +783,10 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
         
         const displayData = extractMetricDisplay(childSource as MetricSource | undefined);
         const childMetric = availableMetrics.find((item) => sourceKey(item.source) === sourceKey(childSource as MetricSource | undefined));
-        const defaultLabel = childMetric?.field.name || (childSource as MetricSource | undefined)?.fieldName || 'Sem Nome';
+        let defaultLabel = childMetric?.label || (childSource as MetricSource | undefined)?.fieldName || 'Sem Nome';
+        if (defaultLabel.toLowerCase() === 'value' || defaultLabel.toLowerCase() === 'valor') {
+          defaultLabel = childMetric?.frame?.name || defaultLabel;
+        }
         const finalLabel = childLabel || defaultLabel;
         
         children.push({
@@ -676,23 +804,27 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
         title: replaceVariables ? replaceVariables(title) : title,
         subtitle: replaceVariables ? replaceVariables(subtitle) : subtitle,
         icon: resolveCardIconName(icon),
+        iconStyle,
         statusColor,
         statusText,
+        layoutType,
         children,
       });
     }
     return cards;
   }, [options, replaceVariables, availableMetrics, theme]);
 
-  if (options.viewMode === 'macro_cards') {
-    const macroLabel = resolveTemplate(options.macroCardsLabel) || 'VISÃO GERAL NOC';
+  if (options.viewMode === 'macro_cards' || (options.viewMode as string) === 'card') {
+    const isSingleCardPanel = (options.macroCardsCount || 1) === 1;
     const parentThresholdTarget = options.parentThresholdTarget || 'both';
     const childThresholdTarget = options.childThresholdTarget || 'value';
 
     return (
-      <div className={styles.avoContainer} style={{ width, height }}>
-        {macroLabel && <div className={styles.avoHeader}>{macroLabel}</div>}
-        <div className={styles.gridPais}>
+      <div 
+        className={isSingleCardPanel ? styles.avoContainerSingle : styles.avoContainer} 
+        style={{ width, height }}
+      >
+        <div className={isSingleCardPanel ? styles.gridPaisSingle : styles.gridPais}>
           {macroCardsConfig.map((card) => {
             const applyParentBg = parentThresholdTarget === 'background' || parentThresholdTarget === 'both';
             const applyParentIcon = parentThresholdTarget === 'icon' || parentThresholdTarget === 'both';
@@ -700,74 +832,158 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
             const parentBgColor = applyParentBg ? card.statusColor : DEFAULT_COLOR;
             const parentIconColor = applyParentIcon ? card.statusColor : DEFAULT_COLOR;
             
+            const configuredChildren = card.children.filter((c) => c.hasConfig).length;
+            const isSingleChild = configuredChildren === 1 || card.children.length === 1;
+            const hasHeader = options.showParentHeader !== false;
+
             return (
               <div
                 key={card.id}
                 className={styles.paiCard}
-                style={applyParentBg ? {
-                  backgroundColor: `color-mix(in srgb, ${parentBgColor} 8%, transparent)`,
-                  boxShadow: `inset 0 0 10px color-mix(in srgb, ${parentBgColor} 15%, transparent)`,
-                  border: `1px solid color-mix(in srgb, ${parentBgColor} 20%, transparent)`,
-                  backgroundImage: 'none',
-                } : {}}
+                style={{
+                  padding: !hasHeader && isSingleChild ? '6px 10px' : isSingleChild ? '8px 10px' : hasHeader ? '10px 12px' : '8px 10px',
+                  gap: hasHeader ? '6px' : '0px',
+                  height: '100%',
+                  justifyContent: !hasHeader && isSingleChild ? 'center' : 'flex-start',
+                  boxSizing: 'border-box',
+                  ...(applyParentBg ? {
+                    backgroundColor: `color-mix(in srgb, ${parentBgColor} 8%, transparent)`,
+                    boxShadow: `inset 0 0 10px color-mix(in srgb, ${parentBgColor} 15%, transparent)`,
+                    border: `1px solid color-mix(in srgb, ${parentBgColor} 20%, transparent)`,
+                    backgroundImage: 'none',
+                  } : {})
+                }}
               >
-                <div className={styles.paiHeader}>
-                  <div style={getIconContainerStyle('contained', parentIconColor, 28, 6)}>
-                    <Icon name={card.icon} size="sm" />
+                {hasHeader && (
+                  <div className={styles.paiHeader}>
+                    <div style={getIconContainerStyle(card.iconStyle, parentIconColor, 28, 6)}>
+                      <Icon name={card.icon} size={card.iconStyle === 'clean' ? 'md' : 'sm'} />
+                    </div>
+                    <div className={styles.paiTitleWrap}>
+                      <div className={cx(styles.paiTitle, styles.textEllipsis)}>{card.title}</div>
+                      {card.subtitle && <div className={cx(styles.paiSubtitle, styles.textEllipsis)}>{card.subtitle}</div>}
+                    </div>
+                    <div
+                      className={styles.paiStatusBadge}
+                      style={{
+                        backgroundColor: `color-mix(in srgb, ${card.statusColor} 15%, transparent)`,
+                        color: card.statusColor,
+                        border: `1px solid color-mix(in srgb, ${card.statusColor} 40%, transparent)`,
+                      }}
+                    >
+                      {card.statusText}
+                    </div>
                   </div>
-                  <div className={styles.paiTitleWrap}>
-                    <div className={cx(styles.paiTitle, styles.textEllipsis)}>{card.title}</div>
-                    {card.subtitle && <div className={cx(styles.paiSubtitle, styles.textEllipsis)}>{card.subtitle}</div>}
-                  </div>
-                  <div
-                    className={styles.paiStatusBadge}
-                    style={{
-                      backgroundColor: `color-mix(in srgb, ${card.statusColor} 15%, transparent)`,
-                      color: card.statusColor,
-                      border: `1px solid color-mix(in srgb, ${card.statusColor} 40%, transparent)`,
-                    }}
-                  >
-                    {card.statusText}
-                  </div>
-                </div>
+                )}
 
-                <div className={styles.filhosGrid}>
-                  {card.children.map((child, idx) => {
-                    const isDestaque = idx < 2;
-                    const cardStyle = cx(styles.filhoCard, isDestaque ? styles.filhoDestaque : styles.filhoNormal);
+                {card.layoutType === 'horizontal' ? (
+                  <div className={styles.horizontalGrid} style={{ marginTop: hasHeader ? '6px' : '0px' }}>
+                    {card.children.map((child) => {
+                      if (!child.hasConfig) {
+                        return <div key={child.id} className={styles.horizontalChild} />;
+                      }
 
-                    if (!child.hasConfig) {
-                      return <div key={child.id} className={cardStyle} />;
-                    }
+                      const applyChildBg = childThresholdTarget === 'background' || childThresholdTarget === 'both';
+                      const applyChildValue = childThresholdTarget === 'value' || childThresholdTarget === 'both';
 
-                    const applyChildBg = childThresholdTarget === 'background' || childThresholdTarget === 'both';
-                    const applyChildValue = childThresholdTarget === 'value' || childThresholdTarget === 'both';
+                      const childBgColor = applyChildBg ? (child.thresholdColor || DEFAULT_COLOR) : DEFAULT_COLOR;
+                      const baseValueColor = theme.isDark ? '#f4f6fb' : theme.colors.text.primary;
+                      const childValueColor = applyChildValue ? (child.thresholdColor || baseValueColor) : baseValueColor;
 
-                    const childBgColor = applyChildBg ? (child.thresholdColor || DEFAULT_COLOR) : DEFAULT_COLOR;
-                    const baseValueColor = theme.isDark ? '#f4f6fb' : theme.colors.text.primary;
-                    const childValueColor = applyChildValue ? (child.thresholdColor || baseValueColor) : baseValueColor;
-
-                    return (
-                      <div 
-                        key={child.id} 
-                        className={cardStyle}
-                        style={applyChildBg ? {
-                          backgroundColor: `color-mix(in srgb, ${childBgColor} 8%, transparent)`,
-                          boxShadow: `inset 0 0 10px color-mix(in srgb, ${childBgColor} 15%, transparent)`,
-                          border: `1px solid color-mix(in srgb, ${childBgColor} 20%, transparent)`,
-                        } : {}}
-                      >
-                        <div className={cx(styles.filhoLabel, styles.textEllipsis)} title={child.label}>{child.label}</div>
+                      return (
                         <div 
-                          className={isDestaque ? styles.filhoValueDestaque : styles.filhoValueNormal}
-                          style={{ color: childValueColor }}
+                          key={child.id} 
+                          className={styles.horizontalChild}
+                          style={applyChildBg ? {
+                            backgroundColor: `color-mix(in srgb, ${childBgColor} 8%, transparent)`,
+                            boxShadow: `inset 0 0 10px color-mix(in srgb, ${childBgColor} 15%, transparent)`,
+                            border: `1px solid color-mix(in srgb, ${childBgColor} 20%, transparent)`,
+                          } : {}}
                         >
-                          {child.displayValue}
+                          <div className={styles.horizontalLabel} title={child.label}>{child.label}</div>
+                          <div 
+                            className={styles.horizontalValue}
+                            style={{ color: childValueColor, marginTop: '8px' }}
+                          >
+                            {child.displayValue}
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                      );
+                    })}
+                  </div>
+                ) : isSingleChild && !hasHeader ? (
+                  <div className={styles.filhosGridSingle}>
+                    {card.children.map((child) => {
+                      const applyChildBg = childThresholdTarget === 'background' || childThresholdTarget === 'both';
+                      const applyChildValue = childThresholdTarget === 'value' || childThresholdTarget === 'both';
+
+                      const childBgColor = applyChildBg ? (child.thresholdColor || DEFAULT_COLOR) : DEFAULT_COLOR;
+                      const baseValueColor = theme.isDark ? '#f4f6fb' : theme.colors.text.primary;
+                      const childValueColor = applyChildValue ? (child.thresholdColor || baseValueColor) : baseValueColor;
+
+                      return (
+                        <div 
+                          key={child.id} 
+                          className={styles.filhoCardSingle}
+                          style={applyChildBg ? {
+                            backgroundColor: `color-mix(in srgb, ${childBgColor} 8%, transparent)`,
+                            boxShadow: `inset 0 0 10px color-mix(in srgb, ${childBgColor} 15%, transparent)`,
+                            border: `1px solid color-mix(in srgb, ${childBgColor} 20%, transparent)`,
+                            borderRadius: '6px',
+                            padding: '6px 10px',
+                          } : {}}
+                        >
+                          <div className={cx(styles.filhoLabel, styles.textEllipsis)} title={child.label}>{child.label}</div>
+                          <div 
+                            className={styles.filhoValueSingle}
+                            style={{ color: childValueColor }}
+                          >
+                            {child.displayValue}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className={styles.filhosGrid} style={{ marginTop: hasHeader ? '6px' : '0px' }}>
+                    {card.children.map((child, idx) => {
+                      const span = getChildGridSpan(idx, card.children.length);
+                      const isDestaque = idx < 2 || span >= 3;
+                      const cardStyle = cx(styles.filhoCard, css`grid-column: span ${span};`);
+
+                      if (!child.hasConfig) {
+                        return <div key={child.id} className={cardStyle} />;
+                      }
+
+                      const applyChildBg = childThresholdTarget === 'background' || childThresholdTarget === 'both';
+                      const applyChildValue = childThresholdTarget === 'value' || childThresholdTarget === 'both';
+
+                      const childBgColor = applyChildBg ? (child.thresholdColor || DEFAULT_COLOR) : DEFAULT_COLOR;
+                      const baseValueColor = theme.isDark ? '#f4f6fb' : theme.colors.text.primary;
+                      const childValueColor = applyChildValue ? (child.thresholdColor || baseValueColor) : baseValueColor;
+
+                      return (
+                        <div 
+                          key={child.id} 
+                          className={cardStyle}
+                          style={applyChildBg ? {
+                            backgroundColor: `color-mix(in srgb, ${childBgColor} 8%, transparent)`,
+                            boxShadow: `inset 0 0 10px color-mix(in srgb, ${childBgColor} 15%, transparent)`,
+                            border: `1px solid color-mix(in srgb, ${childBgColor} 20%, transparent)`,
+                          } : {}}
+                        >
+                          <div className={cx(styles.filhoLabel, styles.textEllipsis)} title={child.label}>{child.label}</div>
+                          <div 
+                            className={isDestaque ? styles.filhoValueDestaque : styles.filhoValueNormal}
+                            style={{ color: childValueColor }}
+                          >
+                            {child.displayValue}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -887,226 +1103,5 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
     );
   }
 
-  // Um único item: layout horizontal dedicado
-  const singleCard = metrics.length === 1;
-
-  if (!singleCard) {
-    const groupedFields: Record<string, import('@grafana/data').Field[]> = {};
-    metrics.forEach(({ metric }) => {
-      if (!metric || !metric.field) return;
-      const field = metric.field;
-      const groupKey = field.labels ? (field.labels['host'] || field.labels['name'] || field.labels['interface'] || field.name) : field.name;
-      if (!groupedFields[groupKey]) {
-        groupedFields[groupKey] = [];
-      }
-      groupedFields[groupKey].push(field);
-    });
-
-    return (
-      <div style={{
-        width: '100%',
-        height: '100%',
-        overflowY: 'auto',
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
-        gap: '16px',
-        padding: '8px',
-        boxSizing: 'border-box'
-      }}>
-        {Object.entries(groupedFields).map(([groupName, groupFields], idx) => {
-          // Determina a cor base do Macro-Card usando o primeiro field do grupo como referência principal
-          const mainField = groupFields[0];
-          const rawVal = mainField.values.length ? mainField.values[mainField.values.length - 1] : undefined;
-          const displayResult = mainField.display ? mainField.display(rawVal) : { color: options.defaultColor || '#32D1A7' };
-          
-          let cardColor = options.defaultColor || '#32D1A7';
-          if (displayResult.color) {
-            try { cardColor = theme.visualization.getColorByName(displayResult.color); }
-            catch (e) { cardColor = displayResult.color; }
-          }
-
-          return (
-            <div key={idx} style={{
-              backgroundColor: 'rgba(15, 23, 42, 0.4)', // Fundo escuro azulado estilo painel NOC
-              border: `1px solid color-mix(in srgb, ${cardColor} 40%, transparent)`,
-              boxShadow: `inset 0 0 20px color-mix(in srgb, ${cardColor} 10%, transparent)`,
-              borderRadius: '8px',
-              padding: '16px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '16px'
-            }}>
-              {/* Header Base (Será refinado e estruturado no Passo 3.2) */}
-              <div style={{ color: '#fff', fontSize: '16px', fontWeight: 700, borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '8px' }}>
-                {groupName}
-              </div>
-
-              {/* Sub-métricas Base (Serão refinadas na malha de blocos no Passo 3.3) */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                 {groupFields.map((f, i) => (
-                   <div key={i} style={{ color: '#9CA3AF', fontSize: '12px' }}>{f.name}</div>
-                 ))}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    );
-  }
-
-  return (
-    <div
-      className={cx(
-        grouped ? styles.containerGrouped : styles.container,
-        css`
-          width: ${width}px;
-          height: ${height}px;
-          box-sizing: border-box;
-          overflow: hidden;
-          padding: 0;
-        `
-      )}
-    >
-      {metrics.map(({ config, metric }) => {
-        const field = metric?.field;
-        const lastValue = field && field.values.length ? field.values[field.values.length - 1] : null;
-        const display = field ? formatFieldValue(lastValue, field, theme) : { text: '—', color: undefined };
-        const customCfg = field?.config.custom;
-        const custom = (field?.config?.custom as CustomFieldConfig) || {};
-        const fieldName = custom.label || config.label || metric?.label || config.source?.fieldName || 'Selecione um campo';
-        const iconName = resolveCardIconName(custom.icon || config.icon || options.defaultIcon || 'server');
-        const iconStyle = custom.iconStyle || options.iconStyle || 'contained';
-        const iconFollowThreshold = custom.iconFollowThreshold === 'auto' || custom.iconFollowThreshold === undefined 
-          ? (options.iconFollowThreshold ?? false)
-          : custom.iconFollowThreshold;
-        const horizontal = (config.horizontalAlign ?? options.horizontalAlign ?? 'left') as 'left' | 'center' | 'right';
-        const vertical = (config.verticalAlign ?? options.verticalAlign ?? 'center') as 'top' | 'center' | 'bottom';
-        const align = { left: 'flex-start', center: 'center', right: 'flex-end' }[horizontal];
-        const justify = { top: 'flex-start', center: 'center', bottom: 'flex-end' }[vertical];
-        const badge = config.badgeMode === 'value' ? display.text : config.badgeMode === 'text' ? config.badgeText : '';
-
-        const useThreshold = customCfg?.useThreshold ?? (options.useThreshold ?? false);
-        const colorMode = customCfg?.colorMode ?? (options.colorMode ?? 'text');
-
-        let bgColor = '';
-        let borderColor = '';
-        
-        const exceededColor = getExceededColor(field, display.color, theme);
-        const metricColor = exceededColor ? resolveColor(theme, exceededColor, accent) : accent;
-        const textColor = metricColor;
-        const iconColor = iconFollowThreshold ? metricColor : accent;
-
-        if (useThreshold && colorMode === 'background' && exceededColor) {
-          bgColor = `color-mix(in srgb, ${metricColor} 15%, transparent)`;
-          borderColor = `color-mix(in srgb, ${metricColor} 40%, transparent)`;
-        }
-
-        const showCardIcon = (customCfg?.showIcon ?? config.showIcon ?? options.showIcon) !== false;
-
-        // ── Card único: layout horizontal (ícone + título à esquerda, valor à direita) ──
-        return (
-          <div
-              key={config.id}
-              className={grouped ? styles.cardGrouped : styles.card}
-              style={{
-                backgroundColor: bgColor || undefined,
-                borderColor: borderColor || undefined,
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                flex: '1 1 auto',
-                width: '100%',
-                height: '100%',
-                boxSizing: 'border-box',
-                overflow: 'hidden',
-                margin: 0,
-                minWidth: 0,
-              }}
-            >
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '12px',
-                  minWidth: 0,
-                  overflow: 'hidden',
-                }}
-              >
-                {showCardIcon && (
-                  <div 
-                    className={iconStyle === 'clean' ? styles.iconClean : styles.iconWrap} 
-                    style={{ 
-                      color: iconColor, 
-                      backgroundColor: iconStyle === 'clean' ? 'transparent' : `color-mix(in srgb, ${iconColor} 20%, transparent)`,
-                      border: iconStyle === 'clean' ? 'none' : `1px solid color-mix(in srgb, ${iconColor} 30%, transparent)`
-                    }}
-                  >
-                    <Icon name={iconName} size={iconStyle === 'clean' ? 'lg' : 'sm'} />
-                  </div>
-                )}
-                {options.showLabel !== false && (
-                  <div
-                    style={{
-                      whiteSpace: 'nowrap',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      minWidth: 0,
-                      fontSize: '13px',
-                      fontWeight: 600,
-                      color: '#D1D5DB',
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.5px'
-                    }}
-                  >
-                    {fieldName}
-                  </div>
-                )}
-              </div>
-              
-              {(options.showValue !== false || badge) && (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'flex-end',
-                    flexShrink: 0,
-                    marginLeft: '16px',
-                    zIndex: 3,
-                  }}
-                >
-                  {options.showValue !== false && (
-                    <span 
-                      style={{ 
-                        color: textColor, 
-                        whiteSpace: 'nowrap',
-                        fontSize: options.valueFontSize || '24px',
-                        fontWeight: 700,
-                      }}
-                    >
-                      {display.text ?? '—'}
-                    </span>
-                  )}
-                  {badge && (
-                    <span
-                      style={{
-                        marginTop: 6,
-                        padding: '2px 8px',
-                        borderRadius: 999,
-                        border: '1px solid currentColor',
-                        color: metricColor,
-                        maxWidth: '100%',
-                        overflowWrap: 'anywhere',
-                      }}
-                    >
-                      {badge}
-                    </span>
-                  )}
-                </div>
-              )}
-              {!metric && <span role="status">Campo indisponível</span>}
-            </div>
-        );
-      })}
-    </div>
-  );
+  return null;
 };

@@ -114,7 +114,6 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
           settings: {
             options: [
               { value: 'status_bar', label: 'Barra de status' },
-              { value: 'card', label: 'Card' },
               { value: 'macro_cards', label: 'Macro-Cards (NOC)' },
             ],
           },
@@ -149,10 +148,18 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
         .addNumberInput({
           path: 'macroCardsCount',
           name: 'Quantidade de Cards Pais',
-          description: 'Define quantos Cards Pais serão exibidos (1 a 4)',
+          description: 'Define quantos Cards Pais serão exibidos (1 a 5)',
           defaultValue: 1,
           category: ['Macro-Cards'],
-          settings: { min: 1, max: 4, integer: true },
+          settings: { min: 1, max: 5, integer: true },
+          showIf: (o) => o.viewMode === 'macro_cards',
+        })
+        .addBooleanSwitch({
+          path: 'showParentHeader',
+          name: 'Mostrar Cabeçalho dos Pais',
+          description: 'Ativa ou desativa o ícone, título e status de todos os cards pais.',
+          defaultValue: true,
+          category: ['Macro-Cards'],
           showIf: (o) => o.viewMode === 'macro_cards',
         })
         .addRadio({
@@ -193,26 +200,7 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
           defaultValue: false,
           category: ['Exibição'],
         })
-        .addBooleanSwitch({
-          path: 'useThreshold',
-          name: 'Card segue cor do Threshold',
-          category: ['Exibição'],
-          defaultValue: false,
-          showIf: (o) => o.viewMode === 'card',
-        })
-        .addRadio({
-          path: 'colorMode',
-          name: 'Modo de Cor do Threshold',
-          defaultValue: 'text',
-          category: ['Exibição'],
-          settings: {
-            options: [
-              { value: 'text', label: 'Apenas Texto' },
-              { value: 'background', label: 'Fundo do Card' },
-            ],
-          },
-          showIf: (o) => o.viewMode === 'card' && o.useThreshold === true,
-        })
+
         .addBooleanSwitch({
           path: 'badgesFollowThreshold',
           name: 'Badges seguem Threshold',
@@ -356,30 +344,9 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
           name: 'Mostrar ícone',
           defaultValue: true,
           category: ['Exibição'],
-        })
-        .addBooleanSwitch({
-          path: 'showLabel',
-          name: 'Mostrar rótulo (nome do campo)',
-          defaultValue: true,
-          category: ['Exibição'],
-          showIf: (o) => o.viewMode === 'card',
-        })
-        .addBooleanSwitch({
-          path: 'showValue',
-          name: 'Mostrar valor',
-          defaultValue: true,
-          category: ['Exibição'],
-          showIf: (o) => o.viewMode === 'card',
-        })
-        .addTextInput({
-          path: 'valueFontSize',
-          name: 'Tamanho da fonte do valor',
-          defaultValue: '26px',
-          category: ['Exibição'],
-          showIf: (o) => o.viewMode === 'card',
         });
 
-    const MAX_MACRO_CARDS = 4;
+    const MAX_MACRO_CARDS = 5;
     for (let i = 1; i <= MAX_MACRO_CARDS; i++) {
       builder
         .addTextInput({
@@ -402,6 +369,19 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
           settings: { options: ICON_OPTIONS },
           showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i,
         })
+        .addRadio({
+          path: `mc${i}_iconStyle`,
+          name: `Card Pai ${i} - Estilo do Ícone`,
+          category: [`Card Pai ${i}`],
+          defaultValue: 'contained',
+          settings: {
+            options: [
+              { value: 'contained', label: 'Com Fundo' },
+              { value: 'clean', label: 'Sem Fundo (Clean)' },
+            ],
+          },
+          showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i,
+        })
         .addCustomEditor({
           id: `mc${i}_statusSource`,
           path: `mc${i}_statusSource`,
@@ -411,11 +391,25 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
           category: [`Card Pai ${i}`],
           showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i,
         })
-        .addBooleanSwitch({
-          path: `mc${i}_showThirdRow`,
-          name: `Mostrar 3ª linha (Métricas 6, 7 e 8)`,
-          category: [`Card Pai ${i} - Métricas`],
-          defaultValue: true,
+        .addRadio({
+          path: `mc${i}_layoutType`,
+          name: `Card Pai ${i} - Layout`,
+          category: [`Card Pai ${i}`],
+          defaultValue: 'grid',
+          settings: {
+            options: [
+              { value: 'grid', label: 'Grid Assimétrico' },
+              { value: 'horizontal', label: 'Horizontal Adaptativo' },
+            ],
+          },
+          showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i,
+        })
+        .addNumberInput({
+          path: `mc${i}_childrenCount`,
+          name: `Card Pai ${i} - Quantidade de Filhos`,
+          category: [`Card Pai ${i}`],
+          defaultValue: 5,
+          settings: { min: 1, max: 8, integer: true },
           showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i,
         });
 
@@ -425,7 +419,13 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
             path: `mc${i}_child${j}_label`,
             name: `Filho ${j} - Rótulo`,
             category: [`Card Pai ${i} - Métricas`],
-            showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i && (j <= 5 || o[`mc${i}_showThirdRow`] !== false),
+            showIf: (o) => {
+              if (o.viewMode !== 'macro_cards' || (o.macroCardsCount ?? 1) < i) return false;
+              const layout = o[`mc${i}_layoutType`] || 'grid';
+              const count = o[`mc${i}_childrenCount`] ?? 5;
+              if (layout === 'horizontal' && j > 4) return false;
+              return j <= count;
+            },
           })
           .addCustomEditor({
             id: `mc${i}_child${j}_source`,
@@ -433,7 +433,13 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
             name: `Filho ${j} - Métrica`,
             editor: MetricSelectorEditor,
             category: [`Card Pai ${i} - Métricas`],
-            showIf: (o) => o.viewMode === 'macro_cards' && (o.macroCardsCount ?? 1) >= i && (j <= 5 || o[`mc${i}_showThirdRow`] !== false),
+            showIf: (o) => {
+              if (o.viewMode !== 'macro_cards' || (o.macroCardsCount ?? 1) < i) return false;
+              const layout = o[`mc${i}_layoutType`] || 'grid';
+              const count = o[`mc${i}_childrenCount`] ?? 5;
+              if (layout === 'horizontal' && j > 4) return false;
+              return j <= count;
+            },
           });
       }
     }
