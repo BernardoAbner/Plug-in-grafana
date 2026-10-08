@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react';
 import { PanelProps, formattedValueToString, getDisplayProcessor } from '@grafana/data';
 import { SimpleOptions, NestedRowMetricConfig } from '../types';
-import { listMetrics, AvailableMetric } from '../metrics';
+import { listMetrics, AvailableMetric, getLastNonNullValue } from '../metrics';
 import { css, cx } from '@emotion/css';
 import { useStyles2, Icon, useTheme2 } from '@grafana/ui';
 import { THEME_COLORS } from './SimplePanel';
@@ -201,7 +201,7 @@ export const NestedGroupPanel: React.FC<Props> = ({ options, data, width, height
     }
 
     const field = metric.field;
-    const raw = field.values.length ? field.values[field.values.length - 1] : null;
+    const raw = getLastNonNullValue(field);
     const displayProc = getDisplayProcessor({ field, theme });
     const display = displayProc(raw);
     const text = formattedValueToString(display);
@@ -256,7 +256,7 @@ export const NestedGroupPanel: React.FC<Props> = ({ options, data, width, height
           const allGroupMetrics = Array.from(rowsMap.values()).flat();
           const triggerMetric = allGroupMetrics.find(m => m.source.refId === tRef);
           if (triggerMetric) {
-            const raw = triggerMetric.field.values.length ? triggerMetric.field.values[triggerMetric.field.values.length - 1] : null;
+            const raw = getLastNonNullValue(triggerMetric.field);
             if (raw === 1 || raw === true || (typeof raw === 'string' && raw.length > 0 && raw !== '0' && raw.toLowerCase() !== 'ok')) {
               triggerActive = true;
               triggerText = String(raw);

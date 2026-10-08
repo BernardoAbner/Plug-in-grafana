@@ -18,34 +18,33 @@ export interface CustomFieldConfig {
 
 export interface DynamicCardOptions {
   viewMode: ViewMode;
-
-  // Opções globais
-  defaultIcon?: string;
-  iconStyle?: 'contained' | 'clean';
-  iconFollowThreshold?: boolean;
   defaultColor?: string;
 
   // Sprint 3: Macro-Cards
   macroCardsCount: number;
   macroCardsLabel?: string;
+  showParentHeader?: boolean;
   parentThresholdTarget?: 'none' | 'icon' | 'background' | 'both';
   childThresholdTarget?: 'none' | 'value' | 'background' | 'both';
+  subMetricFontSize?: 'auto' | 'compact' | 'medium' | 'large';
 
-  // Opções de exibição do Card
-  showIcon?: boolean;
-  showLabel?: boolean;
-  showValue?: boolean;
-  valueFontSize?: string;
-
-  // Barra de status
-  badgesFollowThreshold?: boolean;
-  metricsFollowThreshold?: boolean;
+  // Barra de Status - Bloco Principal (Esquerda)
   headerTitle?: string;
   headerDetailSource?: MetricSource;
+  showIcon?: boolean;
+  defaultIcon?: string;
+  iconStyle?: 'contained' | 'clean';
+  iconFollowThreshold?: boolean;
   indicator1Source?: MetricSource;
   indicator1Label?: string;
   indicator2Source?: MetricSource;
   indicator2Label?: string;
+  badgesFollowThreshold?: boolean;
+  statusBar_uptimeMetric?: MetricSource | string;
+  statusBar_uptimeLabel?: string;
+
+  // Barra de Status - Telemetria Secundária (Direita)
+  metricsFollowThreshold?: boolean;
   statusBarMetric1Source?: MetricSource;
   statusBarMetric1Label?: string;
   statusBarMetric2Source?: MetricSource;
@@ -57,7 +56,7 @@ export interface DynamicCardOptions {
   statusBarMetric5Source?: MetricSource;
   statusBarMetric5Label?: string;
 
-  // Permitir compilação do SimplePanel.tsx antigo durante a transição
+  // Compatibilidade e propriedades dinâmicas
   [key: string]: any;
 }
 

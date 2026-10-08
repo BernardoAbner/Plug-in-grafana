@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react';
 import { PanelProps, Field, formattedValueToString, GrafanaTheme2, getDisplayProcessor, isIconName } from '@grafana/data';
 import { SimpleOptions, CardTheme, MetricSource, CustomFieldConfig } from '../types';
-import { bounded, listMetrics, selectMetrics, sourceKey, matchMetric } from '../metrics';
+import { bounded, listMetrics, selectMetrics, matchMetric, getLastNonNullValue } from '../metrics';
 import { css, cx } from '@emotion/css';
 import { useStyles2, Icon, IconName, useTheme2 } from '@grafana/ui';
 import { PanelDataErrorView } from '@grafana/runtime';
@@ -166,6 +166,18 @@ function isHealthy(value: unknown): boolean {
   }
   const normalized = String(value ?? '').trim().toLowerCase();
   return ['1', 'true', 'up', 'ok', 'active', 'ativo', 'healthy', 'online'].includes(normalized);
+}
+
+function getDynamicSubMetricStyle(text: string, sizeOption: string | undefined): React.CSSProperties {
+  if (sizeOption === 'compact') return { fontSize: '11px', lineHeight: 1.1, wordBreak: 'break-word' };
+  if (sizeOption === 'medium') return { fontSize: '13px', lineHeight: 1.15, wordBreak: 'break-word' };
+  if (sizeOption === 'large') return { fontSize: '16px', lineHeight: 1.2, wordBreak: 'break-word' };
+  
+  // auto
+  const len = (text || '').length;
+  if (len > 10) return { fontSize: '11px', lineHeight: 1.05, wordBreak: 'break-word' };
+  if (len >= 6) return { fontSize: '13px', lineHeight: 1.1, wordBreak: 'break-word' };
+  return { fontSize: '16px', lineHeight: 1.2, fontWeight: 'bold', wordBreak: 'break-word' };
 }
 
 // ─── Estilos ───────────────────────────────────────────────────────────────
@@ -586,13 +598,16 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
     filhoCard: css`
       display: flex;
       flex-direction: column;
-      justify-content: space-between;
+      justify-content: center;
       background-color: rgba(255, 255, 255, 0.03);
       border-radius: 6px;
       padding: ${theme.spacing(0.75)};
       overflow: hidden;
       z-index: 3;
-      min-height: 48px;
+      height: 52px;
+      max-height: 52px;
+      min-height: 52px;
+      box-sizing: border-box;
     `,
     filhoCardSingle: css`
       display: flex;
@@ -616,10 +631,11 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
     `,
     filhoLabel: css`
       color: ${labelColor};
-      font-size: 11px;
+      font-size: 10px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      margin-bottom: 2px;
     `,
     filhoValueDestaque: css`
       color: ${valueTextColor};
@@ -630,10 +646,8 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
     `,
     filhoValueNormal: css`
       color: ${valueTextColor};
-      font-size: 13px;
       font-weight: ${theme.typography.fontWeightBold};
-      margin-top: 2px;
-      line-height: 1.2;
+      margin-top: 0px;
     `,
     filhoValueSingle: css`
       color: ${valueTextColor};
@@ -664,21 +678,22 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       border-radius: 6px;
       padding: ${theme.spacing(1)};
       z-index: 3;
+      height: 52px;
+      max-height: 52px;
+      min-height: 52px;
+      box-sizing: border-box;
     `,
     horizontalLabel: css`
-      font-size: clamp(9px, 8cqi, 12px);
-      white-space: normal;
-      word-wrap: break-word;
-      line-height: 1.1;
+      font-size: 10px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 2px;
       text-align: center;
       color: ${theme.colors.text.secondary};
     `,
     horizontalValue: css`
-      font-size: clamp(10px, 12cqi, 16px);
       font-weight: bold;
-      white-space: normal;
-      word-wrap: break-word;
-      line-height: 1.1;
       text-align: center;
     `,
   };
@@ -712,34 +727,37 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
   const resolveTemplate = (value?: string) => (value ? replaceVariables?.(value) ?? value : '');
   const resolveStatus = (source: MetricSource | undefined, label: string | undefined, healthyLabel: string, unhealthyLabel: string) => {
     const metric = matchMetric(availableMetrics, source);
-    const raw = metric?.field.values.length ? metric.field.values[metric.field.values.length - 1] : undefined;
+    const raw = getLastNonNullValue(metric?.field);
     const healthy = raw === undefined ? undefined : isHealthy(raw);
     const display = metric?.field ? formatFieldValue(raw, metric.field, theme) : undefined;
     const useThreshold = options.badgesFollowThreshold ?? false;
     const finalLabel = label || metric?.label || source?.fieldName || 'STATUS';
     const exceededColor = getExceededColor(metric?.field, display?.color, theme);
     
+    const noDataColor = theme.isDark ? '#8e96a5' : '#6e7687';
+    const finalColor = healthy === undefined ? noDataColor : (useThreshold && exceededColor ? exceededColor : accent);
+    
     return {
       label: finalLabel,
       text: healthy === undefined ? 'SEM DADOS' : display?.text || (healthy ? healthyLabel : unhealthyLabel),
-      color: useThreshold && exceededColor ? exceededColor : accent,
+      color: finalColor,
     };
   };
 
   const extractMetricDisplay = (source: MetricSource | undefined) => {
-    if (!source) return { text: '-', color: theme.colors.text.disabled };
+    if (!source) return { text: '-', color: undefined };
     const metric = matchMetric(availableMetrics, source);
-    if (!metric?.field) return { text: '-', color: theme.colors.text.disabled };
+    if (!metric?.field) return { text: '-', color: undefined };
     
-    const raw = metric.field.values.length ? metric.field.values[metric.field.values.length - 1] : undefined;
-    if (raw === undefined || raw === null) return { text: 'N/A', color: theme.colors.text.secondary };
+    const raw = getLastNonNullValue(metric.field);
+    if (raw === undefined || raw === null) return { text: 'N/A', color: undefined };
     
     const display = formatFieldValue(raw, metric.field, theme);
-    const thresholdColor = display.color ? resolveColor(theme, display.color, theme.colors.text.primary) : theme.colors.text.primary;
+    const exceededColor = getExceededColor(metric.field, display.color, theme);
     
     return {
       text: display.text,
-      color: thresholdColor,
+      color: exceededColor,
     };
   };
 
@@ -757,19 +775,28 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
       const iconStyle = options[`mc${i}_iconStyle`] || 'contained';
       
       const source = options[`mc${i}_statusSource`] as MetricSource | undefined;
-      const metric = availableMetrics.find((item) => sourceKey(item.source) === sourceKey(source));
+      const metric = matchMetric(availableMetrics, source);
       
-      let statusColor = DEFAULT_COLOR;
+      const noDataColor = theme.isDark ? '#8e96a5' : '#6e7687';
+      let statusColor = accent;
       let statusText = 'SEM DADOS';
       
       if (metric?.field) {
-        const raw = metric.field.values.length ? metric.field.values[metric.field.values.length - 1] : undefined;
+        const raw = getLastNonNullValue(metric.field);
         const healthy = raw === undefined ? undefined : isHealthy(raw);
-        const display = formatFieldValue(raw, metric.field, theme);
-        const exceededColor = getExceededColor(metric.field, display.color, theme);
         
-        statusColor = exceededColor || display.color || DEFAULT_COLOR;
-        statusText = display.text || (healthy ? 'NORMAL' : 'ALERTA');
+        if (healthy === undefined) {
+          statusColor = noDataColor;
+          statusText = 'SEM DADOS';
+        } else {
+          const display = formatFieldValue(raw, metric.field, theme);
+          const exceededColor = getExceededColor(metric.field, display.color, theme);
+          statusColor = exceededColor || accent;
+          statusText = display.text || (healthy ? 'NORMAL' : 'ALERTA');
+        }
+      } else {
+        statusColor = noDataColor;
+        statusText = 'SEM DADOS';
       }
 
       const children = [];
@@ -782,7 +809,7 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
         const childSource = options[`mc${i}_child${j}_source`];
         
         const displayData = extractMetricDisplay(childSource as MetricSource | undefined);
-        const childMetric = availableMetrics.find((item) => sourceKey(item.source) === sourceKey(childSource as MetricSource | undefined));
+        const childMetric = matchMetric(availableMetrics, childSource as MetricSource | undefined);
         let defaultLabel = childMetric?.label || (childSource as MetricSource | undefined)?.fieldName || 'Sem Nome';
         if (defaultLabel.toLowerCase() === 'value' || defaultLabel.toLowerCase() === 'valor') {
           defaultLabel = childMetric?.frame?.name || defaultLabel;
@@ -829,8 +856,8 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
             const applyParentBg = parentThresholdTarget === 'background' || parentThresholdTarget === 'both';
             const applyParentIcon = parentThresholdTarget === 'icon' || parentThresholdTarget === 'both';
             
-            const parentBgColor = applyParentBg ? card.statusColor : DEFAULT_COLOR;
-            const parentIconColor = applyParentIcon ? card.statusColor : DEFAULT_COLOR;
+            const parentBgColor = applyParentBg ? card.statusColor : accent;
+            const parentIconColor = applyParentIcon ? card.statusColor : accent;
             
             const configuredChildren = card.children.filter((c) => c.hasConfig).length;
             const isSingleChild = configuredChildren === 1 || card.children.length === 1;
@@ -886,9 +913,11 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
                       const applyChildBg = childThresholdTarget === 'background' || childThresholdTarget === 'both';
                       const applyChildValue = childThresholdTarget === 'value' || childThresholdTarget === 'both';
 
-                      const childBgColor = applyChildBg ? (child.thresholdColor || DEFAULT_COLOR) : DEFAULT_COLOR;
+                      const childBgColor = applyChildBg ? (child.thresholdColor || accent) : accent;
                       const baseValueColor = theme.isDark ? '#f4f6fb' : theme.colors.text.primary;
                       const childValueColor = applyChildValue ? (child.thresholdColor || baseValueColor) : baseValueColor;
+                      
+                      const typoStyle = getDynamicSubMetricStyle(child.displayValue, options.subMetricFontSize);
 
                       return (
                         <div 
@@ -903,7 +932,7 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
                           <div className={styles.horizontalLabel} title={child.label}>{child.label}</div>
                           <div 
                             className={styles.horizontalValue}
-                            style={{ color: childValueColor, marginTop: '8px' }}
+                            style={{ color: childValueColor, ...typoStyle }}
                           >
                             {child.displayValue}
                           </div>
@@ -917,7 +946,7 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
                       const applyChildBg = childThresholdTarget === 'background' || childThresholdTarget === 'both';
                       const applyChildValue = childThresholdTarget === 'value' || childThresholdTarget === 'both';
 
-                      const childBgColor = applyChildBg ? (child.thresholdColor || DEFAULT_COLOR) : DEFAULT_COLOR;
+                      const childBgColor = applyChildBg ? (child.thresholdColor || accent) : accent;
                       const baseValueColor = theme.isDark ? '#f4f6fb' : theme.colors.text.primary;
                       const childValueColor = applyChildValue ? (child.thresholdColor || baseValueColor) : baseValueColor;
 
@@ -958,9 +987,11 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
                       const applyChildBg = childThresholdTarget === 'background' || childThresholdTarget === 'both';
                       const applyChildValue = childThresholdTarget === 'value' || childThresholdTarget === 'both';
 
-                      const childBgColor = applyChildBg ? (child.thresholdColor || DEFAULT_COLOR) : DEFAULT_COLOR;
+                      const childBgColor = applyChildBg ? (child.thresholdColor || accent) : accent;
                       const baseValueColor = theme.isDark ? '#f4f6fb' : theme.colors.text.primary;
                       const childValueColor = applyChildValue ? (child.thresholdColor || baseValueColor) : baseValueColor;
+                      
+                      const typoStyle = getDynamicSubMetricStyle(child.displayValue, options.subMetricFontSize);
 
                       return (
                         <div 
@@ -975,7 +1006,7 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
                           <div className={cx(styles.filhoLabel, styles.textEllipsis)} title={child.label}>{child.label}</div>
                           <div 
                             className={isDestaque ? styles.filhoValueDestaque : styles.filhoValueNormal}
-                            style={{ color: childValueColor }}
+                            style={isDestaque ? { color: childValueColor } : { color: childValueColor, ...typoStyle }}
                           >
                             {child.displayValue}
                           </div>
@@ -994,8 +1025,8 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
 
   if (statusBar) {
     const title = resolveTemplate(options.headerTitle) || 'Resumo do host';
-    const detailMetric = availableMetrics.find((item) => sourceKey(item.source) === sourceKey(options.headerDetailSource));
-    const detailRaw = detailMetric?.field.values.length ? detailMetric.field.values[detailMetric.field.values.length - 1] : undefined;
+    const detailMetric = matchMetric(availableMetrics, options.headerDetailSource);
+    const detailRaw = getLastNonNullValue(detailMetric?.field);
     const subtitle = detailMetric?.field ? formatFieldValue(detailRaw, detailMetric.field, theme).text : '';
 
     const statuses: Array<ReturnType<typeof resolveStatus>> = [];
@@ -1016,6 +1047,39 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
       }
     }
 
+    // Slot dedicado de Uptime / Downtime
+    let uptimeBadge: { label: string; text: string; color: string } | null = null;
+    if (options.statusBar_uptimeMetric) {
+      const uptimeSource: MetricSource | undefined =
+        typeof options.statusBar_uptimeMetric === 'string'
+          ? { fieldName: options.statusBar_uptimeMetric, frameOccurrence: 0, fieldOccurrence: 0 }
+          : options.statusBar_uptimeMetric;
+      const metric = matchMetric(availableMetrics, uptimeSource);
+      const raw = getLastNonNullValue(metric?.field);
+      const configuredLabel = resolveTemplate(options.statusBar_uptimeLabel) || options.statusBar_uptimeLabel;
+      const finalLabel = configuredLabel || metric?.label || uptimeSource?.fieldName || 'UPTIME';
+      const noDataColor = theme.isDark ? '#8e96a5' : '#6e7687';
+
+      if (raw === undefined || raw === null || !metric?.field) {
+        uptimeBadge = {
+          label: finalLabel,
+          text: 'SEM DADOS',
+          color: noDataColor,
+        };
+      } else {
+        const display = formatFieldValue(raw, metric.field, theme);
+        const exceededColor = getExceededColor(metric.field, display.color, theme);
+        const useThreshold = options.badgesFollowThreshold ?? false;
+        const finalColor = useThreshold && exceededColor ? exceededColor : (display.color ? resolveColor(theme, display.color, accent) : accent);
+
+        uptimeBadge = {
+          label: finalLabel,
+          text: display.text,
+          color: finalColor,
+        };
+      }
+    }
+
     const fixedMetricsConfig = [
       { id: '1', source: options.statusBarMetric1Source, label: options.statusBarMetric1Label },
       { id: '2', source: options.statusBarMetric2Source, label: options.statusBarMetric2Label },
@@ -1023,7 +1087,6 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
       { id: '4', source: options.statusBarMetric4Source, label: options.statusBarMetric4Label },
       { id: '5', source: options.statusBarMetric5Source, label: options.statusBarMetric5Label },
     ].filter((m) => m.source);
-
 
     // Ícone do host: usa as opções globais; com 'seguir threshold', acompanha a cor do primeiro indicador
     const hostIconName = resolveCardIconName(options.defaultIcon || 'server');
@@ -1042,22 +1105,39 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
           <div className={styles.identityText}>
             <div className={styles.identityTitleRow}>
               <div className={styles.identityTitle}>{title}</div>
-              {statuses.length > 0 && (
+              {(statuses.length > 0 || uptimeBadge) && (
                 <div className={styles.statusGroup}>
                   {statuses.map((status) => (
                     <div
                       className={styles.health}
                       key={status.label}
                       style={{ 
-                        backgroundColor: `${status.color}15`, 
+                        backgroundColor: `color-mix(in srgb, ${status.color} 15%, transparent)`, 
                         color: status.color,
-                        border: `1px solid ${status.color}40`
+                        border: `1px solid color-mix(in srgb, ${status.color} 40%, transparent)`
                       }}
                       title={status.label}
                     >
                       {status.label}: {status.text}
                     </div>
                   ))}
+                  {uptimeBadge && (
+                    <div
+                      className={styles.health}
+                      style={{
+                        backgroundColor: `color-mix(in srgb, ${uptimeBadge.color} 15%, transparent)`,
+                        color: uptimeBadge.color,
+                        border: `1px solid color-mix(in srgb, ${uptimeBadge.color} 40%, transparent)`,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                      }}
+                      title={uptimeBadge.label}
+                    >
+                      <Icon name={isIconName('clock-nine') ? 'clock-nine' : (isIconName('history') ? 'history' : 'info-circle')} size="xs" />
+                      <span>{uptimeBadge.label}: {uptimeBadge.text}</span>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1066,9 +1146,9 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
         </div>
         <div style={{ display: 'flex', alignItems: 'center', alignContent: 'center', gap: theme.spacing(5), flex: '0 1 auto', flexWrap: 'nowrap', justifyContent: 'flex-end', marginLeft: 'auto' }}>
           {fixedMetricsConfig.map((config) => {
-            const metric = availableMetrics.find((item) => sourceKey(item.source) === sourceKey(config.source));
+            const metric = matchMetric(availableMetrics, config.source);
             const field = metric?.field;
-            const lastValue = field && field.values.length ? field.values[field.values.length - 1] : null;
+            const lastValue = getLastNonNullValue(field);
             const display = field ? formatFieldValue(lastValue, field, theme) : { text: '—', color: undefined };
             const label = config.label || metric?.label || config.source?.fieldName || 'Métrica';
             const customCfg = (field?.config?.custom as CustomFieldConfig) || {};
