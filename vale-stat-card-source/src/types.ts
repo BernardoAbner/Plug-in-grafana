@@ -35,6 +35,8 @@ export type LinePattern = 'solid' | 'dashed';
 export type BarMode = 'grouped' | 'stacked';
 export type ColumnDisplayType = 'text' | 'badge' | 'progressBar' | 'colorByThreshold';
 export type LineGradient = 'none' | 'opacity' | 'fade';
+/** Cor base do rótulo: 'neutral' = cinza (igual Mín/Méd/Máx), 'accent' = cor do tema/série */
+export type LabelColorMode = 'neutral' | 'accent';
 
 export interface AxisConfig {
   autoMin: boolean;
@@ -185,6 +187,8 @@ export interface CustomFieldConfig {
   colorLabelByThreshold?: boolean;
   colorValueByThreshold?: boolean;
   colorSummaryByThreshold?: boolean;
+  exactThresholdMatch?: boolean;
+  labelColorMode?: LabelColorMode;
   // Gráfico
   chartType: ChartType;
   lineColor: string;
@@ -212,6 +216,8 @@ export interface SimpleOptions {
   useThreshold: boolean;
   showThresholdLine: boolean;
   thresholdMode: ThresholdMode;
+  exactThresholdMatch?: boolean;
+  labelColorMode?: LabelColorMode;
   // Toggles de visibilidade do cabeçalho
   showIcon: boolean;
   showLabel: boolean;

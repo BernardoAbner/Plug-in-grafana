@@ -2,8 +2,37 @@ import React, { useEffect, useRef, useCallback } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import { ChartType, LineInterpolation, LinePattern, ThresholdMode } from '../types';
-import { getDisplayProcessor, formattedValueToString } from '@grafana/data';
+import { getDisplayProcessor } from '@grafana/data';
 import { css } from '@emotion/css';
+
+export function parseColorToRgba(color: string, alpha: number): string {
+  if (!color) return `rgba(45, 212, 191, ${alpha})`;
+  if (color.startsWith('#')) {
+    let hex = color.slice(1);
+    if (hex.length === 3) {
+      hex = hex.split('').map((c) => c + c).join('');
+    }
+    if (hex.length >= 6) {
+      const r = parseInt(hex.slice(0, 2), 16);
+      const g = parseInt(hex.slice(2, 4), 16);
+      const b = parseInt(hex.slice(4, 6), 16);
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+  }
+  if (color.startsWith('rgb(')) {
+    const parts = color.replace('rgb(', '').replace(')', '').split(',');
+    if (parts.length >= 3) {
+      return `rgba(${parts[0].trim()}, ${parts[1].trim()}, ${parts[2].trim()}, ${alpha})`;
+    }
+  }
+  if (color.startsWith('rgba(')) {
+    const parts = color.replace('rgba(', '').replace(')', '').split(',');
+    if (parts.length >= 3) {
+      return `rgba(${parts[0].trim()}, ${parts[1].trim()}, ${parts[2].trim()}, ${alpha})`;
+    }
+  }
+  return `color-mix(in srgb, ${color} ${Math.round(alpha * 100)}%, transparent)`;
+}
 
 const getTooltipStyles = (theme: any) => ({
   tooltip: css`
@@ -178,14 +207,14 @@ export const UplotChart: React.FC<UplotChartProps> = ({
       const color = getSeriesColor(s);
 
       const dash = linePattern === 'dashed' ? [6, 4] : [];
+      const isVisible = selectedSeriesIndex === null || selectedSeriesIndex === idx;
 
       seriesConfig.push({
-        show: true,
+        show: isVisible,
         spanGaps: false,
         stroke: (u, seriesIdx) => {
           if (useThreshold && thresholdMode === 'schema') {
              // Basic schema: we'll just use the series color for now
-             // A true schema gradient requires more complex logic to map values to stops
              return color;
           }
           return color;
@@ -194,19 +223,25 @@ export const UplotChart: React.FC<UplotChartProps> = ({
         dash,
         paths: chartType === 'bar' ? uPlot.paths.bars!() : getPaths(),
         points: {
-          // IMPORTANTE: false explícito quando não queremos pontos.
-          // `showPoints || undefined` é errado porque `false || undefined = undefined`,
-          // e undefined faz o uPlot usar o comportamento padrão (mostrar pontos!).
           show: showPoints ? true : false,
           size: showPoints ? pointSize * 2 : 0,
         },
         fill: (u, seriesIdx) => {
           if (chartType !== 'area') return 'rgba(0,0,0,0)';
           const gradient = u.ctx.createLinearGradient(0, u.bbox.top, 0, u.bbox.top + u.bbox.height);
-          // Mantém a cor mais forte na maior parte e só apaga no finalzinho
-          gradient.addColorStop(0, `color-mix(in srgb, ${color} ${areaOpacity * 100}%, transparent)`);
-          gradient.addColorStop(0.7, `color-mix(in srgb, ${color} ${areaOpacity * 80}%, transparent)`);
-          gradient.addColorStop(1, `color-mix(in srgb, ${color} 5%, transparent)`);
+          const isMultiSeriesMode = seriesInfos.length > 1 && selectedSeriesIndex === null;
+
+          if (isMultiSeriesMode) {
+            // No modo multi-série: 0.12 no topo e 0.02 na base para não ofuscar o grid
+            gradient.addColorStop(0, parseColorToRgba(color, 0.12));
+            gradient.addColorStop(0.6, parseColorToRgba(color, 0.05));
+            gradient.addColorStop(1, parseColorToRgba(color, 0.02));
+          } else {
+            // No modo single-série / isolado: 0.20 no topo, 0.08 em 60% e 0.02 na base
+            gradient.addColorStop(0, parseColorToRgba(color, 0.20));
+            gradient.addColorStop(0.6, parseColorToRgba(color, 0.08));
+            gradient.addColorStop(1, parseColorToRgba(color, 0.02));
+          }
           return gradient;
         }
       });
@@ -228,11 +263,8 @@ export const UplotChart: React.FC<UplotChartProps> = ({
       scales: {
         x: { time: true, range: [timeRange.from / 1000, timeRange.to / 1000] },
         y: { 
-          auto: !(seriesInfos[0]?.fieldConfig?.min != null && seriesInfos[0]?.fieldConfig?.max != null),
-          range: [
-            seriesInfos[0]?.fieldConfig?.min ?? yLo,
-            seriesInfos[0]?.fieldConfig?.max ?? yHi
-          ]
+          auto: false,
+          range: [yLo, yHi > yLo ? yHi : yLo + 1]
         }
       },
       axes: [
@@ -500,7 +532,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
         uplotRef.current = null;
       }
     };
-  }, [width, height, times, timeRange, seriesInfos, chartType, lineInterpolation, linePattern, lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis, yLo, yHi, theme, thresholdMode, useThreshold, thresholdLines, getSeriesColor, axisTextColor, axisLineColor, gridLineColor]);
+  }, [width, height, times, timeRange, seriesInfos, chartType, lineInterpolation, linePattern, lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis, yLo, yHi, theme, thresholdMode, useThreshold, thresholdLines, getSeriesColor, axisTextColor, axisLineColor, gridLineColor, selectedSeriesIndex]);
 
   // Update size without recreating instance if only dimensions change
   useEffect(() => {

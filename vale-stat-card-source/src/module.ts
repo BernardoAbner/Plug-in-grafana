@@ -9,6 +9,7 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
       [FieldConfigProperty.Unit]: {},
       [FieldConfigProperty.Decimals]: {},
       [FieldConfigProperty.Thresholds]: {},
+      [FieldConfigProperty.Mappings]: {},
     },
     useCustomConfig: (builder) => {
       builder
@@ -176,15 +177,21 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
           defaultValue: false,
           category: ['Cabeçalho'],
         })
+        .addRadio({
+          path: 'labelColorMode',
+          name: 'Cor base do Rótulo (Override)',
+          description: 'Cor do rótulo quando não há threshold violado.',
+          category: ['Cabeçalho'],
+          settings: {
+            options: [
+              { value: 'neutral', label: 'Cinza (neutro)' },
+              { value: 'accent', label: 'Cor do tema/série' },
+            ],
+          },
+        })
         .addBooleanSwitch({
           path: 'colorLabelByThreshold',
           name: 'Usar cor do threshold no Rótulo',
-          defaultValue: false,
-          category: ['Cabeçalho'],
-        })
-        .addBooleanSwitch({
-          path: 'colorValueByThreshold',
-          name: 'Usar cor do threshold na Métrica (Valor)',
           defaultValue: false,
           category: ['Cabeçalho'],
         })
@@ -223,6 +230,19 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
         name: 'Mostrar Resumo do Período',
         defaultValue: true,
         category: ['Cabeçalho'],
+      })
+      .addRadio({
+        path: 'labelColorMode',
+        name: 'Cor base do Rótulo',
+        description: 'Cinza = mesma cor do resumo (Mín/Méd/Máx). Se "Usar cor do threshold no Rótulo" estiver ativo, o rótulo assume a cor do threshold apenas quando violado.',
+        defaultValue: 'neutral',
+        category: ['Cabeçalho'],
+        settings: {
+          options: [
+            { value: 'neutral', label: 'Cinza (neutro)' },
+            { value: 'accent', label: 'Cor do tema/série' },
+          ],
+        },
       })
       .addRadio({
         path: 'iconStyle',
@@ -270,7 +290,7 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
       .addBooleanSwitch({
         path: 'useThreshold',
         name: 'Usar cor de threshold',
-        description: 'Aplica as cores dos thresholds nativos ao valor/linha.',
+        description: 'Aplica as cores dos thresholds nativos ao valor e ao gráfico.',
         defaultValue: false,
         category: ['Aparencia'],
       })
@@ -279,13 +299,6 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
         name: 'Mostrar linha de threshold',
         description: 'Desenha uma linha tracejada no gráfico indicando o limite.',
         defaultValue: true,
-        category: ['Aparencia'],
-      })
-      .addBooleanSwitch({
-        path: 'valueFollowsThreshold',
-        name: 'Valor acompanha cor de threshold',
-        description: 'A cor do valor grande segue a cor do threshold ativo.',
-        defaultValue: false,
         category: ['Aparencia'],
         showIf: (o) => o.useThreshold === true,
       })
@@ -300,6 +313,14 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
             { value: 'schema', label: 'Por faixas (schema)' },
           ],
         },
+        showIf: (o) => o.useThreshold === true,
+      })
+      .addBooleanSwitch({
+        path: 'exactThresholdMatch',
+        name: 'Threshold por valor exato (==)',
+        description: 'Compara thresholds por igualdade exata (==) em vez de maior ou igual (>=). Recomendado para status discretos como ICMP Ping (0 = Down).',
+        defaultValue: false,
+        category: ['Aparencia'],
         showIf: (o) => o.useThreshold === true,
       })
       // --- Grafico (panel-level) ---
