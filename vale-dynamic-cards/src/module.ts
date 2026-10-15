@@ -171,14 +171,6 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
         },
         showIf: (o) => o.viewMode === 'status_bar' && o.showIcon !== false,
       })
-      .addBooleanSwitch({
-        path: 'iconFollowThreshold',
-        name: 'Ícone Principal segue Threshold',
-        description: 'Acompanha a cor de threshold do primeiro indicador de status.',
-        defaultValue: false,
-        category: ['Barra de Status - Bloco Principal (Esquerda)'],
-        showIf: (o) => o.viewMode === 'status_bar' && o.showIcon !== false,
-      })
       .addCustomEditor({
         id: 'indicator1Source',
         path: 'indicator1Source',

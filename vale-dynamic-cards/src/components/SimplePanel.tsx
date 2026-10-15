@@ -182,8 +182,11 @@ function getDynamicSubMetricStyle(text: string, sizeOption: string | undefined):
 
 // ─── Estilos ───────────────────────────────────────────────────────────────
 const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions) => {
-  const baseBg = theme.isDark ? '#0c101b' : theme.colors.background.primary;
-  const borderColor = theme.isDark ? 'rgba(255,255,255,0.06)' : theme.colors.border.weak;
+  const baseBg = theme.isDark ? '#0c141d' : theme.colors.background.primary;
+  const cardGradient = theme.isDark
+    ? 'linear-gradient(180deg, #0e1922 0%, #0c141d 50%, #0b111a 85%, #111217 100%)'
+    : 'none';
+  const borderColor = theme.isDark ? 'rgba(255, 255, 255, 0.06)' : theme.colors.border.weak;
   const labelColor = theme.isDark ? 'rgba(255,255,255,0.55)' : theme.colors.text.secondary;
   const valueTextColor = theme.isDark ? '#f4f6fb' : theme.colors.text.primary;
 
@@ -216,21 +219,11 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       align-items: stretch;
       justify-content: flex-start;
       background-color: ${baseBg};
-      background-image: linear-gradient(180deg, ${accent}12 0%, ${accent}02 100%);
+      background-image: ${cardGradient};
       border: 1px solid ${borderColor};
       border-radius: ${bounded(options.borderRadius, 12, 0, 100)}px;
       padding: ${bounded(options.cardPadding, 16, 0, 100)}px;
       position: relative;
-      
-      &::before {
-        content: '';
-        position: absolute;
-        inset: 0;
-        background: linear-gradient(180deg, rgba(255,255,255,0.02) 0%, rgba(0,0,0,0.15) 100%);
-        pointer-events: none;
-        border-radius: inherit;
-        z-index: 2;
-      }
     `,
     card: css`
       position: relative;
@@ -241,7 +234,7 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       box-sizing: border-box;
       border-radius: ${bounded(options.borderRadius, 12, 0, 100)}px;
       background-color: ${baseBg};
-      background-image: linear-gradient(180deg, ${accent}12 0%, ${accent}02 100%);
+      background-image: ${cardGradient};
       border: 1px solid ${borderColor};
       overflow: hidden;
       font-family: ${theme.typography.fontFamily};
@@ -250,16 +243,6 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       transition:
         background-color 0.2s ease,
         border-color 0.2s ease;
-
-      &::before {
-        content: '';
-        position: absolute;
-        inset: 0;
-        background: linear-gradient(180deg, rgba(255,255,255,0.02) 0%, rgba(0,0,0,0.15) 100%);
-        pointer-events: none;
-        border-radius: inherit;
-        z-index: 2;
-      }
     `,
     cardGrouped: css`
       position: relative;
@@ -357,27 +340,12 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       box-sizing: border-box;
       overflow: hidden;
       padding: ${theme.spacing(1.5)} ${theme.spacing(2)};
-      background-color: ${theme.isDark ? '#0c101b' : theme.colors.background.primary};
-      background-image: linear-gradient(180deg, ${accent}12 0%, ${accent}02 100%);
+      background-color: ${baseBg};
+      background-image: ${cardGradient};
+      border: 1px solid ${borderColor};
       border-radius: 12px;
       font-family: ${theme.typography.fontFamily};
       position: relative;
-      
-      &::before {
-        content: '';
-        position: absolute;
-        inset: 0;
-        background: linear-gradient(180deg, rgba(255,255,255,0.02) 0%, rgba(0,0,0,0.15) 100%);
-        pointer-events: none;
-        border-radius: 11px;
-        z-index: 2;
-      }
-      
-      /* Make sure children stay above the pseudo-element */
-      > * {
-        position: relative;
-        z-index: 3;
-      }
     `,
     identity: css`
       display: flex;
@@ -453,26 +421,12 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       flex-direction: column;
       box-sizing: border-box;
       overflow: hidden;
-      background-color: ${theme.isDark ? '#0c101b' : theme.colors.background.primary};
-      background-image: linear-gradient(180deg, ${accent}12 0%, ${accent}02 100%);
+      background-color: ${baseBg};
+      background-image: ${cardGradient};
+      border: 1px solid ${borderColor};
       border-radius: 12px;
       padding: ${theme.spacing(1)} ${theme.spacing(1.5)};
       position: relative;
-      
-      &::before {
-        content: '';
-        position: absolute;
-        inset: 0;
-        background: linear-gradient(180deg, rgba(255,255,255,0.02) 0%, rgba(0,0,0,0.15) 100%);
-        pointer-events: none;
-        border-radius: 11px;
-        z-index: 2;
-      }
-      
-      > * {
-        position: relative;
-        z-index: 3;
-      }
     `,
     avoContainerSingle: css`
       flex-grow: 1;
@@ -530,8 +484,9 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       flex-direction: column;
       border-radius: 12px;
       padding: ${theme.spacing(1)};
-      background-color: rgba(15, 23, 42, 0.4);
-      background-image: linear-gradient(180deg, rgba(255,255,255,0.02) 0%, rgba(0,0,0,0.1) 100%);
+      background-color: ${baseBg};
+      background-image: ${cardGradient};
+      border: 1px solid ${borderColor};
       overflow: hidden;
       font-family: ${theme.typography.fontFamily};
       gap: ${theme.spacing(0.5)};
@@ -727,20 +682,36 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
   const resolveTemplate = (value?: string) => (value ? replaceVariables?.(value) ?? value : '');
   const resolveStatus = (source: MetricSource | undefined, label: string | undefined, healthyLabel: string, unhealthyLabel: string) => {
     const metric = matchMetric(availableMetrics, source);
-    const raw = getLastNonNullValue(metric?.field);
-    const healthy = raw === undefined ? undefined : isHealthy(raw);
-    const display = metric?.field ? formatFieldValue(raw, metric.field, theme) : undefined;
-    const useThreshold = options.badgesFollowThreshold ?? false;
-    const finalLabel = label || metric?.label || source?.fieldName || 'STATUS';
-    const exceededColor = getExceededColor(metric?.field, display?.color, theme);
-    
     const noDataColor = theme.isDark ? '#8e96a5' : '#6e7687';
-    const finalColor = healthy === undefined ? noDataColor : (useThreshold && exceededColor ? exceededColor : accent);
-    
+
+    if (!metric?.field) {
+      return {
+        label: label || source?.fieldName || 'STATUS',
+        text: 'SEM DADOS',
+        color: noDataColor,
+      };
+    }
+
+    const raw = getLastNonNullValue(metric.field);
+    const healthy = raw === undefined ? undefined : isHealthy(raw);
+
+    if (healthy === undefined) {
+      return {
+        label: label || metric.label || source?.fieldName || 'STATUS',
+        text: 'SEM DADOS',
+        color: noDataColor,
+      };
+    }
+
+    const display = formatFieldValue(raw, metric.field, theme);
+    const exceededColor = getExceededColor(metric.field, display.color, theme);
+    const statusColor = exceededColor || (display.color ? resolveColor(theme, display.color, accent) : accent);
+    const finalLabel = label || metric.label || source?.fieldName || 'STATUS';
+
     return {
       label: finalLabel,
-      text: healthy === undefined ? 'SEM DADOS' : display?.text || (healthy ? healthyLabel : unhealthyLabel),
-      color: finalColor,
+      text: display.text || (healthy ? healthyLabel : unhealthyLabel),
+      color: statusColor,
     };
   };
 
@@ -812,7 +783,7 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
         const childMetric = matchMetric(availableMetrics, childSource as MetricSource | undefined);
         let defaultLabel = childMetric?.label || (childSource as MetricSource | undefined)?.fieldName || 'Sem Nome';
         if (defaultLabel.toLowerCase() === 'value' || defaultLabel.toLowerCase() === 'valor') {
-          defaultLabel = childMetric?.frame?.name || defaultLabel;
+          defaultLabel = childMetric?.frame?.name || (childSource as MetricSource | undefined)?.frameName || defaultLabel;
         }
         const finalLabel = childLabel || defaultLabel;
         
@@ -1088,11 +1059,10 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
       { id: '5', source: options.statusBarMetric5Source, label: options.statusBarMetric5Label },
     ].filter((m) => m.source);
 
-    // Ícone do host: usa as opções globais; com 'seguir threshold', acompanha a cor do primeiro indicador
+    // Ícone do host: sempre acompanha a cor do primeiro indicador de status (ex: ICMP Ping)
     const hostIconName = resolveCardIconName(options.defaultIcon || 'server');
     const hostIconStyle = options.iconStyle || 'contained';
-    const hostIconColor =
-      options.iconFollowThreshold && statuses.length > 0 ? resolveColor(theme, statuses[0].color, accent) : accent;
+    const hostIconColor = statuses.length > 0 ? resolveColor(theme, statuses[0].color, accent) : accent;
 
     return (
       <div className={styles.statusBar} style={{ width, height, flexWrap: 'nowrap' }}>

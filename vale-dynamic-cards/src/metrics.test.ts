@@ -1,5 +1,5 @@
 import { FieldType, toDataFrame } from '@grafana/data';
-import { bounded, listMetrics, selectMetrics } from './metrics';
+import { bounded, listMetrics, selectMetrics, matchMetric } from './metrics';
 import { SimpleOptions } from './types';
 
 const frames = () =>
@@ -13,10 +13,11 @@ const frames = () =>
     })
   );
 
-test('old dashboards keep first-frame fields only', () => {
+test('automatic mode extracts all frame fields', () => {
   const result = selectMetrics(frames(), {} as SimpleOptions);
-  expect(result).toHaveLength(1);
+  expect(result).toHaveLength(2);
   expect(result[0].metric?.field.values[0]).toBe(10);
+  expect(result[1].metric?.field.values[0]).toBe(90);
 });
 
 test('configured selection preserves order and query identity after frames reorder', () => {
@@ -69,4 +70,61 @@ test('layout limits reject nonfinite values and clamp extremes', () => {
   expect(bounded(NaN, 16, 0, 100)).toBe(16);
   expect(bounded(-1, 16, 0, 100)).toBe(0);
   expect(bounded(101, 16, 0, 100)).toBe(100);
+});
+
+test('matchMetric resolves Zabbix metric transitioning from history (Value) to trends ([avg] with avg field)', () => {
+  // Métrica salva durante range de 3h (history mode)
+  const savedSource = {
+    refId: 'A',
+    frameName: 'ICMP ping',
+    frameOccurrence: 0,
+    fieldName: 'Value',
+    fieldOccurrence: 0,
+  };
+
+  // Dados recebidos durante range de 6h (trends mode: frame ganha [avg] e campo vira avg)
+  const trendsData = [
+    toDataFrame({
+      refId: 'A',
+      name: 'ICMP ping [avg]',
+      fields: [
+        { name: 'time', type: FieldType.time, values: [1] },
+        { name: 'avg', type: FieldType.number, values: [1] },
+      ],
+    }),
+  ];
+
+  const available = listMetrics(trendsData);
+  const matched = matchMetric(available, savedSource);
+
+  expect(matched).toBeDefined();
+  expect(matched?.field.name).toBe('avg');
+  expect(matched?.field.values[0]).toBe(1);
+});
+
+test('matchMetric resolves metric when host prefix is added or removed across time ranges', () => {
+  const savedSource = {
+    refId: 'B',
+    frameName: 'ICMP ping',
+    frameOccurrence: 0,
+    fieldName: 'Value',
+    fieldOccurrence: 0,
+  };
+
+  const prefixedData = [
+    toDataFrame({
+      refId: 'B',
+      name: 'srv-01: ICMP ping',
+      fields: [
+        { name: 'time', type: FieldType.time, values: [1] },
+        { name: 'Value', type: FieldType.number, values: [20] },
+      ],
+    }),
+  ];
+
+  const available = listMetrics(prefixedData);
+  const matched = matchMetric(available, savedSource);
+
+  expect(matched).toBeDefined();
+  expect(matched?.field.values[0]).toBe(20);
 });

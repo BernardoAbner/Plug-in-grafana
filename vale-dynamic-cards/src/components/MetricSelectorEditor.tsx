@@ -20,11 +20,11 @@ export const MetricSelectorEditor = ({ value, onChange, context }: StandardEdito
     })),
   ];
 
-  // Se o usuário salvou uma métrica que sumiu dos dados atuais, injeta na lista para não ser apagada no onBlur/mount
   if (value && !matched) {
+    const fallbackLabel = value.frameName || value.fieldName || 'Métrica';
     options.push({
       value: sourceKey(value),
-      label: `(Ausente) ${value.refId ?? ''} / ${value.fieldName ?? ''}`,
+      label: `(Ausente) ${value.refId ?? ''} / ${fallbackLabel}`,
     });
   }
 

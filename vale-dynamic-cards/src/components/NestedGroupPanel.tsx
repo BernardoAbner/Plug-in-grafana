@@ -9,8 +9,11 @@ import { THEME_COLORS } from './SimplePanel';
 interface Props extends PanelProps<SimpleOptions> {}
 
 const getStyles = (theme: ReturnType<typeof useTheme2>, accent: string, options: SimpleOptions) => {
-  const baseBg = theme.colors.background.primary;
-  const borderColor = theme.colors.border.weak;
+  const baseBg = theme.isDark ? '#0c141d' : theme.colors.background.primary;
+  const cardGradient = theme.isDark
+    ? 'linear-gradient(180deg, #0e1922 0%, #0c141d 50%, #0b111a 85%, #111217 100%)'
+    : 'none';
+  const borderColor = theme.isDark ? 'rgba(255, 255, 255, 0.06)' : theme.colors.border.weak;
   const labelColor = theme.colors.text.secondary;
   const valueTextColor = theme.colors.text.primary;
   
@@ -27,19 +30,11 @@ const getStyles = (theme: ReturnType<typeof useTheme2>, accent: string, options:
       display: flex;
       flex-direction: column;
       background-color: ${baseBg};
+      background-image: ${cardGradient};
       border: 1px solid ${borderColor};
       border-radius: 12px;
       overflow: hidden;
       position: relative;
-      &::before {
-        content: '';
-        position: absolute;
-        inset: 0;
-        background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, rgba(0, 0, 0, 0.1) 100%);
-        pointer-events: none;
-        border-radius: inherit;
-        z-index: 2;
-      }
     `,
     boxHeader: css`
       display: flex;

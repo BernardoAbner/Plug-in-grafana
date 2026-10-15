@@ -91,8 +91,8 @@ const getStyles = (
   altColor: string,
   themeAccent: string
 ) => {
-  const baseBg = '#0c101b';
-  const themeGradient = `linear-gradient(180deg, ${themeAccent}12 0%, ${themeAccent}02 100%)`;
+  const baseBg = '#0c141d';
+  const themeGradient = 'linear-gradient(180deg, #0e1922 0%, #0c141d 50%, #0b111a 85%, #111217 100%)';
 
   return {
     wrapper: css`
@@ -106,16 +106,6 @@ const getStyles = (
       background-color: ${baseBg};
       background-image: ${themeGradient};
       font-family: inherit;
-
-      &::before {
-        content: '';
-        position: absolute;
-        inset: 0;
-        background: linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, rgba(0, 0, 0, 0.15) 100%);
-        pointer-events: none;
-        border-radius: 11px;
-        z-index: 2;
-      }
     `,
     inner: css`
       width: 100%;
