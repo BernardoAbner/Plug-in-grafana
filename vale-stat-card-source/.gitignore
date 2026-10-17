@@ -43,6 +43,7 @@ ci/
 /playwright/.auth/
 
 # Editor
-.idea
-
 .eslintcache
+
+# Local deployment scripts
+deploy.ps1

@@ -200,6 +200,13 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
           name: 'Usar cor do threshold no Resumo (Mín/Méd/Máx)',
           defaultValue: false,
           category: ['Cabeçalho'],
+        })
+        .addBooleanSwitch({
+          path: 'exactThresholdMatch',
+          name: 'Threshold por valor exato (==)',
+          description: 'Compara thresholds por igualdade exata (==) em vez de (>=). Ideal para ICMP Ping (0 = Down).',
+          defaultValue: false,
+          category: ['Cabeçalho'],
         });
     },
   })
@@ -356,6 +363,26 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
         name: 'Mostrar eixo Y',
         defaultValue: false,
         category: ['Gráfico'],
+        showIf: (o) => o.showSparkline,
+      })
+      .addSelect({
+        path: 'disconnectThreshold',
+        name: 'Lacunas sem dados (Gap)',
+        description: 'Define o intervalo máximo sem coleta antes de interromper a linha do gráfico. Evita linhas retas falsas quando o host fica desligado/sem dados.',
+        defaultValue: 'auto',
+        category: ['Gráfico'],
+        settings: {
+          options: [
+            { value: 'auto',  label: 'Automático (3.5× coleta / mín. 2m)' },
+            { value: '1m',    label: 'Desconectar após > 1 minuto' },
+            { value: '2m',    label: 'Desconectar após > 2 minutos' },
+            { value: '5m',    label: 'Desconectar após > 5 minutos' },
+            { value: '15m',   label: 'Desconectar após > 15 minutos' },
+            { value: '30m',   label: 'Desconectar após > 30 minutos' },
+            { value: '1h',    label: 'Desconectar após > 1 hora' },
+            { value: 'never', label: 'Conectar sempre (ignorar lacunas)' },
+          ],
+        },
         showIf: (o) => o.showSparkline,
       })
       .addBooleanSwitch({

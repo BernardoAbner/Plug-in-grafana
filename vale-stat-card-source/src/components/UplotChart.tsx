@@ -1,14 +1,281 @@
 import React, { useEffect, useRef, useCallback } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
-import { ChartType, LineInterpolation, LinePattern, ThresholdMode } from '../types';
+import { ChartType, LineInterpolation, LinePattern, ThresholdMode, DisconnectThresholdMode } from '../types';
 import { getDisplayProcessor } from '@grafana/data';
 import { css } from '@emotion/css';
 
-export function parseColorToRgba(color: string, alpha: number): string {
-  if (!color) return `rgba(45, 212, 191, ${alpha})`;
-  if (color.startsWith('#')) {
-    let hex = color.slice(1);
+/**
+ * Calcula o intervalo típico de coleta (em ms) usando a mediana dos deltas positivos consecutivos.
+ * A mediana é imune a grandes hiatos (ex: horas de máquina desligada), ao contrário da média aritmética.
+ */
+export function estimateTypicalStepMs(times: number[], tStart = 0, tEnd = 0): number {
+  if (!times || times.length < 2) {
+    return tEnd > tStart ? Math.max(tEnd - tStart, 1000) : 60000;
+  }
+  const deltas: number[] = [];
+  for (let i = 1; i < times.length; i++) {
+    const dt = times[i] - times[i - 1];
+    if (dt > 0) {
+      deltas.push(dt);
+    }
+  }
+  if (deltas.length === 0) {
+    return 60000;
+  }
+  deltas.sort((a, b) => a - b);
+  const mid = Math.floor(deltas.length / 2);
+  const median = deltas.length % 2 !== 0
+    ? deltas[mid]
+    : (deltas[mid - 1] + deltas[mid]) / 2;
+  return Math.max(median, 1000);
+}
+
+/**
+ * Resolve o limite máximo de tempo sem dados (em ms) antes de considerar uma lacuna (gap)
+ * e desconectar a linha do gráfico / encerrar episódio de alerta.
+ */
+export function resolveDisconnectThresholdMs(
+  typicalStepMs: number,
+  mode: DisconnectThresholdMode = 'auto'
+): number {
+  switch (mode) {
+    case '1m':
+      return 60 * 1000;
+    case '2m':
+      return 2 * 60 * 1000;
+    case '5m':
+      return 5 * 60 * 1000;
+    case '15m':
+      return 15 * 60 * 1000;
+    case '30m':
+      return 30 * 60 * 1000;
+    case '1h':
+      return 60 * 60 * 1000;
+    case 'never':
+      return Infinity;
+    case 'auto':
+    default:
+      // Padrão explícito: 3.5x o ciclo normal de coleta da série (mínimo de 2 minutos)
+      return Math.max(typicalStepMs * 3.5, 2 * 60 * 1000);
+  }
+}
+
+/**
+ * Constrói a matriz AlignedData do uPlot [x_sec, y1, y2, ...] garantindo que:
+ * 1) Qualquer hiato temporal > maxGapMs receba pontos explícitos `null` (mesmo quando o datasource
+ *    como Zabbix omite linhas em vez de enviar `null`), interrompendo o traço e a área.
+ * 2) Múltiplas séries com timestamps desalinhados ou hiatos distintos sejam alinhadas na mesma régua.
+ */
+export function buildAlignedDataWithGaps(
+  seriesInfos: Array<{ values: Array<number | null | undefined>; timeValues?: number[] }>,
+  fallbackTimes: number[],
+  disconnectThreshold: DisconnectThresholdMode = 'auto'
+): uPlot.AlignedData {
+  if (!seriesInfos || seriesInfos.length === 0) {
+    return [fallbackTimes.map((t) => t / 1000)];
+  }
+
+  const processed = seriesInfos.map((s) => {
+    const rawTimes = s.timeValues && s.timeValues.length > 0 ? s.timeValues : fallbackTimes;
+    const rawVals = s.values || [];
+    const len = Math.min(rawTimes.length, rawVals.length);
+    const stepMs = estimateTypicalStepMs(rawTimes);
+    const maxGapMs = resolveDisconnectThresholdMs(stepMs, disconnectThreshold);
+
+    const pTimes: number[] = [];
+    const pVals: Array<number | null> = [];
+
+    for (let i = 0; i < len; i++) {
+      const t = rawTimes[i];
+      const rawV = rawVals[i];
+      const v = rawV === null || rawV === undefined || (rawV as any) === '' || Number.isNaN(Number(rawV))
+        ? null
+        : Number(rawV);
+
+      pTimes.push(t);
+      pVals.push(v);
+
+      if (disconnectThreshold !== 'never' && i + 1 < len) {
+        const nextT = rawTimes[i + 1];
+        const dt = nextT - t;
+        if (dt > maxGapMs) {
+          const offset = Math.min(stepMs, Math.max(1, Math.floor(dt * 0.2)));
+          const gapStart = t + offset;
+          pTimes.push(gapStart);
+          pVals.push(null);
+
+          if (dt > stepMs * 4) {
+            const gapMid = Math.floor((t + nextT) / 2);
+            if (gapMid > gapStart) {
+              pTimes.push(gapMid);
+              pVals.push(null);
+            }
+          }
+
+          if (dt > stepMs * 2) {
+            const gapEnd = nextT - offset;
+            if (gapEnd > pTimes[pTimes.length - 1] && gapEnd < nextT) {
+              pTimes.push(gapEnd);
+              pVals.push(null);
+            }
+          }
+        }
+      }
+    }
+
+    return { times: pTimes, values: pVals, stepMs, maxGapMs };
+  });
+
+  if (processed.length === 1) {
+    return [
+      processed[0].times.map((t) => t / 1000),
+      processed[0].values,
+    ];
+  }
+
+  // Verifica se todas as séries já compartilham exatamente os mesmos timestamps (fast-path)
+  const p0 = processed[0];
+  const allSameTimeline = processed.every(
+    (p) => p.times.length === p0.times.length && p.times.every((t, idx) => t === p0.times[idx])
+  );
+  if (allSameTimeline) {
+    return [
+      p0.times.map((t) => t / 1000),
+      ...processed.map((p) => p.values),
+    ];
+  }
+
+  // Multi-série com timestamps distintos: unifica a linha do tempo com tolerância de jitter de coleta
+  const minStepMs = Math.min(...processed.map((p) => p.stepMs));
+  const mergeTolMs = Math.min(minStepMs * 0.4, 15000);
+
+  const allRawTimes: number[] = [];
+  for (const p of processed) {
+    for (let i = 0; i < p.times.length; i++) {
+      allRawTimes.push(p.times[i]);
+    }
+  }
+  allRawTimes.sort((a, b) => a - b);
+
+  const masterTimes: number[] = [];
+  for (let i = 0; i < allRawTimes.length; i++) {
+    const t = allRawTimes[i];
+    if (masterTimes.length === 0 || t - masterTimes[masterTimes.length - 1] > mergeTolMs) {
+      masterTimes.push(t);
+    }
+  }
+
+  const alignedSeries = processed.map((p) => {
+    const out: Array<number | null> = new Array(masterTimes.length).fill(null);
+    if (p.times.length === 0) {
+      return out;
+    }
+    const matchWindow = Math.max(mergeTolMs, p.stepMs * 0.55);
+    let ptr = 0;
+    for (let mIdx = 0; mIdx < masterTimes.length; mIdx++) {
+      const mT = masterTimes[mIdx];
+      while (ptr + 1 < p.times.length && Math.abs(p.times[ptr + 1] - mT) <= Math.abs(p.times[ptr] - mT)) {
+        ptr++;
+      }
+      if (Math.abs(p.times[ptr] - mT) <= matchWindow) {
+        out[mIdx] = p.values[ptr];
+      }
+    }
+    return out;
+  });
+
+  return [
+    masterTimes.map((t) => t / 1000),
+    ...alignedSeries,
+  ];
+}
+
+export const GRAFANA_NAMED_COLORS: Record<string, string> = {
+  red: '#F2495C',
+  'dark-red': '#C4162A',
+  'semi-dark-red': '#E02F44',
+  'light-red': '#FF7383',
+  'super-light-red': '#FFA6B0',
+  orange: '#FF9830',
+  'dark-orange': '#FA6400',
+  'semi-dark-orange': '#FF780A',
+  'light-orange': '#FFB357',
+  'super-light-orange': '#FFCB7D',
+  yellow: '#FADE2A',
+  'dark-yellow': '#E0B400',
+  'semi-dark-yellow': '#F2CC0C',
+  'light-yellow': '#FFEE52',
+  'super-light-yellow': '#FFF899',
+  green: '#73BF69',
+  'dark-green': '#37872D',
+  'semi-dark-green': '#56A64B',
+  'light-green': '#96D98D',
+  'super-light-green': '#C8F2C2',
+  blue: '#5794F2',
+  'dark-blue': '#1F60C4',
+  'semi-dark-blue': '#3274D9',
+  'light-blue': '#8AB8FF',
+  'super-light-blue': '#C0D8FF',
+  purple: '#B877D9',
+  'dark-purple': '#8F3BB8',
+  'semi-dark-purple': '#A352CC',
+  'light-purple': '#CA95E5',
+  'super-light-purple': '#DEB6F2',
+  text: '#CCCCDC',
+  transparent: 'rgba(0,0,0,0)',
+};
+
+/**
+ * Converte qualquer cor (incluindo cores nomeadas da paleta do Grafana como 'dark-red')
+ * em um formato seguro para Canvas 2D (hexadecimal ou rgb/rgba).
+ */
+export function resolveCanvasColor(color: string, theme?: any, fallback = '#2dd4bf'): string {
+  if (!color) return fallback;
+  const raw = String(color).trim();
+  const lower = raw.toLowerCase();
+  if (GRAFANA_NAMED_COLORS[lower]) {
+    return GRAFANA_NAMED_COLORS[lower];
+  }
+  if (theme?.visualization?.getColorByName) {
+    try {
+      const fromTheme = theme.visualization.getColorByName(raw);
+      if (fromTheme && fromTheme !== raw) {
+        const fromThemeLower = fromTheme.toLowerCase();
+        if (GRAFANA_NAMED_COLORS[fromThemeLower]) {
+          return GRAFANA_NAMED_COLORS[fromThemeLower];
+        }
+        if (fromTheme.startsWith('#') || fromTheme.startsWith('rgb(') || fromTheme.startsWith('rgba(')) {
+          return fromTheme;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (raw.startsWith('#') || raw.startsWith('rgb(') || raw.startsWith('rgba(')) {
+    return raw;
+  }
+  return fallback;
+}
+
+/**
+ * Converte qualquer cor em string rgba(r, g, b, alpha) válida.
+ * NUNCA retorna color-mix(...) pois o Canvas 2D (createLinearGradient.addColorStop)
+ * rejeita color-mix e quebra a renderização do uPlot.
+ */
+export function parseColorToRgba(color: string, alpha: number, theme?: any): string {
+  const safeAlpha = Math.max(0, Math.min(1, isNaN(alpha) ? 0.35 : alpha));
+  if (!color) return `rgba(45, 212, 191, ${safeAlpha})`;
+
+  const resolved = resolveCanvasColor(color, theme);
+
+  if (resolved.toLowerCase() === 'transparent' || resolved.replace(/\s+/g, '') === 'rgba(0,0,0,0)') {
+    return `rgba(0, 0, 0, 0)`;
+  }
+
+  if (resolved.startsWith('#')) {
+    let hex = resolved.slice(1);
     if (hex.length === 3) {
       hex = hex.split('').map((c) => c + c).join('');
     }
@@ -16,22 +283,16 @@ export function parseColorToRgba(color: string, alpha: number): string {
       const r = parseInt(hex.slice(0, 2), 16);
       const g = parseInt(hex.slice(2, 4), 16);
       const b = parseInt(hex.slice(4, 6), 16);
-      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      return `rgba(${r}, ${g}, ${b}, ${safeAlpha})`;
     }
   }
-  if (color.startsWith('rgb(')) {
-    const parts = color.replace('rgb(', '').replace(')', '').split(',');
-    if (parts.length >= 3) {
-      return `rgba(${parts[0].trim()}, ${parts[1].trim()}, ${parts[2].trim()}, ${alpha})`;
-    }
+
+  const rgbMatch = resolved.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+  if (rgbMatch) {
+    return `rgba(${rgbMatch[1]}, ${rgbMatch[2]}, ${rgbMatch[3]}, ${safeAlpha})`;
   }
-  if (color.startsWith('rgba(')) {
-    const parts = color.replace('rgba(', '').replace(')', '').split(',');
-    if (parts.length >= 3) {
-      return `rgba(${parts[0].trim()}, ${parts[1].trim()}, ${parts[2].trim()}, ${alpha})`;
-    }
-  }
-  return `color-mix(in srgb, ${color} ${Math.round(alpha * 100)}%, transparent)`;
+
+  return `rgba(45, 212, 191, ${safeAlpha})`;
 }
 
 const getTooltipStyles = (theme: any) => ({
@@ -134,6 +395,7 @@ export interface UplotChartProps {
   axisLineColor: string;
   gridLineColor: string;
   selectedSeriesIndex: number | null;
+  disconnectThreshold?: DisconnectThresholdMode;
   onHover: (ts: number | null, points: any[] | null, px: number, py: number) => void;
   onClickTimeRange?: (from: number, to: number) => void;
   onDoubleClick?: () => void;
@@ -144,7 +406,8 @@ export const UplotChart: React.FC<UplotChartProps> = ({
   width, height, seriesInfos, times, timeRange, chartType, lineInterpolation, linePattern,
   lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis,
   yLo, yHi, theme, thresholdMode, useThreshold, thresholdLines, getSeriesColor,
-  axisTextColor, axisLineColor, gridLineColor, selectedSeriesIndex, onHover, onClickTimeRange, onDoubleClick, onChartClick
+  axisTextColor, axisLineColor, gridLineColor, selectedSeriesIndex, disconnectThreshold = 'auto',
+  onHover, onClickTimeRange, onDoubleClick, onChartClick
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -180,17 +443,11 @@ export const UplotChart: React.FC<UplotChartProps> = ({
   }, [hideOverlays, onHover]);
 
   useEffect(() => {
-    if (!containerRef.current || times.length === 0) return;
+    if (!containerRef.current || (times.length === 0 && seriesInfos.every((s) => !s.timeValues?.length))) return;
 
-    // Prepare data array for uPlot: [x_values, y1_values, y2_values, ...]
-    // Note: uPlot requires timestamps in seconds, not ms
-    const data: uPlot.AlignedData = [
-      times.map(t => t / 1000)
-    ];
-
-    seriesInfos.forEach(s => {
-      data.push(s.values);
-    });
+    // Prepare aligned data array for uPlot: [x_values_sec, y1_values, y2_values, ...]
+    // Injeta pontos `null` explícitos quando o intervalo entre coletas excede o limite (disconnectThreshold)
+    const data: uPlot.AlignedData = buildAlignedDataWithGaps(seriesInfos, times, disconnectThreshold);
 
     const getPaths = () => {
       if (lineInterpolation === 'smooth') return uPlot.paths.spline!();
@@ -204,14 +461,14 @@ export const UplotChart: React.FC<UplotChartProps> = ({
     ];
 
     seriesInfos.forEach((s, idx) => {
-      const color = getSeriesColor(s);
+      const color = resolveCanvasColor(getSeriesColor(s), theme);
 
       const dash = linePattern === 'dashed' ? [6, 4] : [];
       const isVisible = selectedSeriesIndex === null || selectedSeriesIndex === idx;
 
       seriesConfig.push({
         show: isVisible,
-        spanGaps: false,
+        spanGaps: disconnectThreshold === 'never',
         stroke: (u, seriesIdx) => {
           if (useThreshold && thresholdMode === 'schema') {
              // Basic schema: we'll just use the series color for now
@@ -228,21 +485,32 @@ export const UplotChart: React.FC<UplotChartProps> = ({
         },
         fill: (u, seriesIdx) => {
           if (chartType !== 'area') return 'rgba(0,0,0,0)';
-          const gradient = u.ctx.createLinearGradient(0, u.bbox.top, 0, u.bbox.top + u.bbox.height);
-          const isMultiSeriesMode = seriesInfos.length > 1 && selectedSeriesIndex === null;
+          try {
+            const gradient = u.ctx.createLinearGradient(0, u.bbox.top, 0, u.bbox.top + u.bbox.height);
+            const isMultiSeriesMode = seriesInfos.length > 1 && selectedSeriesIndex === null;
 
-          if (isMultiSeriesMode) {
-            // No modo multi-série: 0.12 no topo e 0.02 na base para não ofuscar o grid
-            gradient.addColorStop(0, parseColorToRgba(color, 0.12));
-            gradient.addColorStop(0.6, parseColorToRgba(color, 0.05));
-            gradient.addColorStop(1, parseColorToRgba(color, 0.02));
-          } else {
-            // No modo single-série / isolado: 0.20 no topo, 0.08 em 60% e 0.02 na base
-            gradient.addColorStop(0, parseColorToRgba(color, 0.20));
-            gradient.addColorStop(0.6, parseColorToRgba(color, 0.08));
-            gradient.addColorStop(1, parseColorToRgba(color, 0.02));
+            if (isMultiSeriesMode) {
+              // No modo multi-série: usa areaOpacity escalonado para não ofuscar o grid
+              const topAlpha = Math.min(areaOpacity * 0.6, 0.4);
+              const midAlpha = topAlpha * 0.4;
+              const baseAlpha = topAlpha * 0.15;
+              gradient.addColorStop(0, parseColorToRgba(color, topAlpha, theme));
+              gradient.addColorStop(0.6, parseColorToRgba(color, midAlpha, theme));
+              gradient.addColorStop(1, parseColorToRgba(color, baseAlpha, theme));
+            } else {
+              // No modo single-série / isolado: respeita a prop areaOpacity no topo
+              const topAlpha = Math.min(Math.max(areaOpacity, 0), 1);
+              const midAlpha = topAlpha * 0.4;
+              const baseAlpha = topAlpha * 0.1;
+              gradient.addColorStop(0, parseColorToRgba(color, topAlpha, theme));
+              gradient.addColorStop(0.6, parseColorToRgba(color, midAlpha, theme));
+              gradient.addColorStop(1, parseColorToRgba(color, baseAlpha, theme));
+            }
+            return gradient;
+          } catch (e) {
+            console.warn('[UplotChart] Error creating linear gradient fill:', e);
+            return parseColorToRgba(color, 0.1, theme);
           }
-          return gradient;
         }
       });
     });
@@ -261,11 +529,11 @@ export const UplotChart: React.FC<UplotChartProps> = ({
       },
       legend: { show: false },
       scales: {
-        x: { time: true, range: [timeRange.from / 1000, timeRange.to / 1000] },
-        y: { 
+        x: { time: true, range: () => [timeRange.from / 1000, timeRange.to / 1000] },
+        y: {
           auto: false,
-          range: [yLo, yHi > yLo ? yHi : yLo + 1]
-        }
+          range: () => [yLo, yHi > yLo ? yHi : yLo + 1],
+        },
       },
       axes: [
         {
@@ -325,7 +593,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
               // Desenhar a linha pontilhada
               ctx.beginPath();
               // Usar a cor configurada ou um fallback elegante (ex: vermelho translúcido)
-              ctx.strokeStyle = line.color || 'rgba(255, 60, 60, 0.6)';
+              ctx.strokeStyle = resolveCanvasColor(line.color, theme, 'rgba(255, 60, 60, 0.6)');
               ctx.lineWidth = 1.5;
               ctx.setLineDash([5, 5]); // Estilo tracejado premium
               
@@ -362,7 +630,8 @@ export const UplotChart: React.FC<UplotChartProps> = ({
               return;
             }
 
-            const ts = times[idx];
+            const xSec = u.data[0]?.[idx];
+            const ts = xSec !== undefined ? Math.round(xSec * 1000) : times[idx];
 
             const timeEl = el.querySelector('.tooltipTime');
             if (timeEl) timeEl.textContent = formatTooltipTime(ts);
@@ -375,11 +644,13 @@ export const UplotChart: React.FC<UplotChartProps> = ({
               seriesInfos.forEach((s, idxSeries) => {
                 if (selectedSeriesIndex !== null && selectedSeriesIndex !== idxSeries) return;
 
-                const val = s.values[idx];
+                const rawVal = u.data[idxSeries + 1]?.[idx];
+                if (rawVal === null || rawVal === undefined || Number.isNaN(Number(rawVal))) return;
+                const val = Number(rawVal);
                 const displayProcessor = s.field.display || getDisplayProcessor({ field: s.field, theme });
                 const display = displayProcessor(val);
                 const formatted = display.text + (display.suffix ? display.suffix : '');
-                const color = getSeriesColor(s);
+                const color = resolveCanvasColor(getSeriesColor(s), theme);
 
                 activeMetrics.push({
                   rawValue: val,
@@ -447,7 +718,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
                 markerEl.style.left = `${cx + u.bbox.left / window.devicePixelRatio}px`;
                 markerEl.style.top = `${cy + u.bbox.top / window.devicePixelRatio}px`;
                 markerEl.style.transform = 'translate(-50%, -50%)';
-                markerEl.style.backgroundColor = getSeriesColor(s);
+                markerEl.style.backgroundColor = resolveCanvasColor(getSeriesColor(s), theme);
               } else {
                 markerEl.style.display = 'none';
               }
@@ -499,7 +770,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
               el.style.display = 'none';
             }
 
-            onHover(ts, null, cx, firstActiveCy ?? 0);
+            onHover(firstActiveCy != null ? ts : null, null, cx, firstActiveCy ?? 0);
           }
         ],
         setSelect: [
@@ -532,7 +803,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
         uplotRef.current = null;
       }
     };
-  }, [width, height, times, timeRange, seriesInfos, chartType, lineInterpolation, linePattern, lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis, yLo, yHi, theme, thresholdMode, useThreshold, thresholdLines, getSeriesColor, axisTextColor, axisLineColor, gridLineColor, selectedSeriesIndex]);
+  }, [width, height, times, timeRange, seriesInfos, chartType, lineInterpolation, linePattern, lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis, yLo, yHi, theme, thresholdMode, useThreshold, thresholdLines, getSeriesColor, axisTextColor, axisLineColor, gridLineColor, selectedSeriesIndex, disconnectThreshold]);
 
   // Update size without recreating instance if only dimensions change
   useEffect(() => {

@@ -11,12 +11,12 @@ import {
 } from '@grafana/data';
 import {
   SimpleOptions, CardTheme,
-  NativeThresholdsConfig, ThresholdStep, CustomFieldConfig,
+  NativeThresholdsConfig, ThresholdStep, CustomFieldConfig, DisconnectThresholdMode,
 } from '../types';
 import { css, cx } from '@emotion/css';
 import { useStyles2, Icon, useTheme2 } from '@grafana/ui';
 import { PanelDataErrorView } from '@grafana/runtime';
-import { UplotChart, parseColorToRgba } from './UplotChart';
+import { UplotChart, parseColorToRgba, resolveCanvasColor, estimateTypicalStepMs, resolveDisconnectThresholdMs } from './UplotChart';
 
 interface Props extends PanelProps<SimpleOptions> { }
 
@@ -149,6 +149,36 @@ function getActiveNativeThreshold(
 }
 
 
+/**
+ * Obtém se a métrica avalia thresholds por correspondência exata (==)
+ * Prioriza: override no fieldConfig > field.config.custom > panel options > false
+ */
+function getFieldExactMatch(
+  field: Field,
+  panelExactMatch = false,
+  panelFieldConfig?: FieldConfigSource
+): boolean {
+  if (panelFieldConfig?.overrides) {
+    for (const override of panelFieldConfig.overrides) {
+      const fieldName = field.name;
+      const displayName = field.state?.displayName;
+      const matches =
+        !override.matcher ||
+        (override.matcher.id === 'byName' && (override.matcher.options === fieldName || (displayName && override.matcher.options === displayName))) ||
+        (override.matcher.id === 'byRegexp' && (new RegExp(override.matcher.options).test(fieldName) || (displayName && new RegExp(override.matcher.options).test(displayName)))) ||
+        (override.matcher.id === 'byType' && override.matcher.options === field.type);
+      if (matches) {
+        const prop = override.properties.find((p) => p.id === 'custom.exactThresholdMatch' || p.id === 'exactThresholdMatch');
+        if (prop?.value !== undefined) {
+          return Boolean(prop.value);
+        }
+      }
+    }
+  }
+  const custom = (field.config?.custom ?? {}) as CustomFieldConfig;
+  return custom?.exactThresholdMatch ?? panelExactMatch ?? false;
+}
+
 /** Usa o threshold nativo do Grafana e preserva a configuração legada do plugin. */
 function getFieldThresholds(
   field: Field,
@@ -159,9 +189,12 @@ function getFieldThresholds(
   let overrideThresholds: any = undefined;
   if (panelFieldConfig?.overrides) {
     for (const override of panelFieldConfig.overrides) {
+      const fieldName = field.name;
+      const displayName = field.state?.displayName;
       const matches =
         !override.matcher ||
-        (override.matcher.id === 'byName' && override.matcher.options === field.name) ||
+        (override.matcher.id === 'byName' && (override.matcher.options === fieldName || (displayName && override.matcher.options === displayName))) ||
+        (override.matcher.id === 'byRegexp' && (new RegExp(override.matcher.options).test(fieldName) || (displayName && new RegExp(override.matcher.options).test(displayName)))) ||
         (override.matcher.id === 'byType' && override.matcher.options === field.type);
       if (matches) {
         const prop = override.properties.find((p) => p.id === 'thresholds');
@@ -240,39 +273,81 @@ function getAlertDurations(
   thresholds: NativeThresholdsConfig | undefined,
   tStart: number,
   tEnd: number,
-  exactMatch = false
+  exactMatch = false,
+  disconnectThreshold: DisconnectThresholdMode = 'auto'
 ): AlertDuration[] {
-  if (!thresholds?.steps.some((step) => step.value !== null)) { return []; }
-  const durations = new Map<number, AlertDuration>();
-  values.forEach((value, index) => {
-    const step = getActiveNativeThreshold(value, thresholds, exactMatch);
-    if (!step || step.value === null) { return; }
-    const from = Math.max(times[index] ?? tStart, tStart);
-    const to = Math.min(times[index + 1] ?? tEnd, tEnd);
-    if (to <= from) { return; }
-    const current = durations.get(step.value) ?? { value: step.value, color: step.color, durationMs: 0 };
-    current.durationMs += to - from;
-    durations.set(step.value, current);
-  });
-  return [...durations.values()].sort((a, b) => a.value - b.value);
+  if (!thresholds?.steps) { return []; }
+
+  // Deduplicar e ordenar steps válidos (não-nulos) de forma crescente
+  const validStepsMap = new Map<number, { value: number; color: string }>();
+  for (const step of thresholds.steps) {
+    if (step.value !== null && step.value !== undefined && !isNaN(Number(step.value))) {
+      validStepsMap.set(Number(step.value), { value: Number(step.value), color: step.color });
+    }
+  }
+  const validSteps = [...validStepsMap.values()].sort((a, b) => a.value - b.value);
+
+  if (validSteps.length === 0) { return []; }
+
+  const sampleStep = estimateTypicalStepMs(times, tStart, tEnd);
+  const maxGapMs = resolveDisconnectThresholdMs(sampleStep, disconnectThreshold);
+
+  const results: AlertDuration[] = [];
+
+  for (const step of validSteps) {
+    let durationMs = 0;
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i];
+      if (v === null || v === undefined || isNaN(v)) { continue; }
+      const violates = exactMatch
+        ? Math.abs(v - step.value) < 1e-6
+        : v >= step.value;
+      if (violates) {
+        const ptTime = times[i] !== undefined ? times[i] : (tStart + i * sampleStep);
+        let nextPtTime: number;
+        if (i + 1 < times.length && times[i + 1] !== undefined && times[i + 1] > ptTime) {
+          const dt = times[i + 1] - ptTime;
+          nextPtTime = dt > maxGapMs ? (ptTime + sampleStep) : times[i + 1];
+        } else if (ptTime < tEnd) {
+          const dtEnd = tEnd - ptTime;
+          nextPtTime = dtEnd > maxGapMs ? (ptTime + sampleStep) : tEnd;
+        } else {
+          nextPtTime = ptTime + sampleStep;
+        }
+
+        const from = Math.max(ptTime, tStart);
+        const to = Math.max(nextPtTime, from + 1);
+        durationMs += to - from;
+      }
+    }
+    if (durationMs > 0) {
+      results.push({
+        value: step.value,
+        color: step.color,
+        durationMs,
+      });
+    }
+  }
+
+  return results.sort((a, b) => a.value - b.value);
 }
 
 // ─── Lógica de Episódios de Alerta e Badge ─────────────────────────────────
 
 export interface AlertEpisode {
-  /** Valor do step de threshold violado (identifica a sessão/severidade) */
+  /** Valor do step de threshold violado (identifica o nível/severidade) */
   stepValue: number;
   startTs: number;
   endTs: number;
   durationMs: number;
-  /** Cor do threshold violado neste episódio */
+  /** Cor hexadecimal válida do threshold violado neste episódio */
   color: string;
   /** Estatísticas dos valores reais durante o episódio */
   avgValue: number;
   minValue: number;
   maxValue: number;
   /** true quando o episódio ainda está em andamento (último valor válido pertence a ele) */
-  isActiveNow?: boolean;
+  isActiveNow: boolean;
   /** Campos internos para cálculo incremental */
   _sum: number;
   _count: number;
@@ -280,87 +355,221 @@ export interface AlertEpisode {
 }
 
 /**
- * Varre o array de valores e agrupa violações consecutivas do mesmo threshold
- * em "episódios" (ocorrências) de alerta, contendo início, fim e duração.
- * Cada ocorrência carrega o step violado para depois ser agrupada em sessões
- * por severidade no popup.
+ * Garante que a cor do alerta seja sempre um hexadecimal válido.
+ * Faz fallback caso o Grafana envie "text", "transparent" ou vazio.
  */
-function getAlertEpisodes(
+function resolveAlertHexColor(color?: string | null, fallback = '#E24D42'): string {
+  const raw = (color ?? '').trim();
+  const lower = raw.toLowerCase();
+  if (
+    !raw ||
+    lower === 'text' ||
+    lower === 'transparent' ||
+    lower.replace(/\s+/g, '') === 'rgba(0,0,0,0)'
+  ) {
+    return fallback;
+  }
+  if (raw.startsWith('#')) {
+    return raw;
+  }
+  const namedFallbacks: Record<string, string> = {
+    red: '#F2495C',
+    'dark-red': '#C4162A',
+    'semi-dark-red': '#E02F44',
+    'light-red': '#FF7383',
+    'super-light-red': '#FFA6B0',
+    orange: '#FF9830',
+    'dark-orange': '#FA6400',
+    'semi-dark-orange': '#FF780A',
+    'light-orange': '#FFB357',
+    'super-light-orange': '#FFCB7D',
+    yellow: '#FADE2A',
+    'dark-yellow': '#E0B400',
+    'semi-dark-yellow': '#F2CC0C',
+    'light-yellow': '#FFEE52',
+    'super-light-yellow': '#FFF899',
+    green: '#73BF69',
+    'dark-green': '#37872D',
+    'semi-dark-green': '#56A64B',
+    'light-green': '#96D98D',
+    'super-light-green': '#C8F2C2',
+    blue: '#5794F2',
+    'dark-blue': '#1F60C4',
+    'semi-dark-blue': '#3274D9',
+    'light-blue': '#8AB8FF',
+    'super-light-blue': '#C0D8FF',
+    purple: '#B877D9',
+    'dark-purple': '#8F3BB8',
+    'semi-dark-purple': '#A352CC',
+    'light-purple': '#CA95E5',
+    'super-light-purple': '#DEB6F2',
+  };
+  if (namedFallbacks[lower]) {
+    return namedFallbacks[lower];
+  }
+  const rgbMatch = raw.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+  if (rgbMatch) {
+    const r = Math.min(255, Math.max(0, Number(rgbMatch[1]))).toString(16).padStart(2, '0');
+    const g = Math.min(255, Math.max(0, Number(rgbMatch[2]))).toString(16).padStart(2, '0');
+    const b = Math.min(255, Math.max(0, Number(rgbMatch[3]))).toString(16).padStart(2, '0');
+    return `#${r}${g}${b}`;
+  }
+  return fallback;
+}
+
+/**
+ * Varre o array de valores avaliando cada threshold step válido em sua própria passagem independente.
+ * Retorna um Array Plano (flat array) unificado com todas as ocorrências da janela,
+ * ordenado estritamente por:
+ *   1º: Casos em aberto (isActiveNow === true) no topo, do maior para o menor stepValue.
+ *   2º: Casos encerrados do mais recente para o mais antigo (b.startTs - a.startTs).
+ */
+export function getAlertEpisodes(
   values: number[],
   times: number[],
   thresholds: NativeThresholdsConfig | undefined,
   tStart: number,
   tEnd: number,
-  exactMatch = false
+  exactMatch = false,
+  disconnectThreshold: DisconnectThresholdMode = 'auto'
 ): AlertEpisode[] {
-  if (!thresholds?.steps?.some((step) => step.value !== null)) { return []; }
+  if (!thresholds?.steps) { return []; }
 
-  const episodes: AlertEpisode[] = [];
-  let current: AlertEpisode | null = null;
-  let lastValidIndex = -1;
-
-  const close = () => {
-    if (current) { episodes.push(current); current = null; }
-  };
-
-  for (let i = 0; i < values.length; i++) {
-    const value = values[i];
-
-    // Valor inválido/inexistente quebra a continuidade do episódio
-    if (value === null || value === undefined || isNaN(value)) {
-      close();
-      continue;
-    }
-    lastValidIndex = i;
-
-    const step = getActiveNativeThreshold(value, thresholds, exactMatch);
-    if (!step || step.value === null) {
-      // Retornou ao normal
-      close();
-      continue;
-    }
-
-    // Limitar os timestamps pelo espaço de tempo visível no gráfico
-    const from = Math.max(times[i], tStart);
-    const to = Math.min(times[i + 1] ?? tEnd, tEnd);
-    if (to < from) { continue; }
-
-    const cur = current as AlertEpisode | null;
-    if (cur && cur.stepValue === step.value) {
-      // Continua no mesmo episódio
-      cur.endTs = to;
-      cur.durationMs += to - from;
-      cur._sum += value;
-      cur._count += 1;
-      cur._lastIndex = i;
-      cur.avgValue = cur._sum / cur._count;
-      if (value < cur.minValue) { cur.minValue = value; }
-      if (value > cur.maxValue) { cur.maxValue = value; }
-    } else {
-      // Mudou de severidade ou começou um novo episódio
-      close();
-      current = {
-        stepValue: step.value,
-        startTs: from,
-        endTs: to,
-        durationMs: to - from,
-        color: step.color,
-        avgValue: value,
-        minValue: value,
-        maxValue: value,
-        _sum: value,
-        _count: 1,
-        _lastIndex: i,
-      };
+  // Deduplicar e ordenar steps válidos (não-nulos) de forma crescente
+  const validStepsMap = new Map<number, { value: number; color: string }>();
+  for (const step of thresholds.steps) {
+    if (step.value !== null && step.value !== undefined && (step.value as any) !== '' && !isNaN(Number(step.value))) {
+      const numVal = Number(step.value);
+      validStepsMap.set(numVal, {
+        value: numVal,
+        color: resolveAlertHexColor(step.color),
+      });
     }
   }
-  close();
+  const validSteps = [...validStepsMap.values()].sort((a, b) => a.value - b.value);
 
-  episodes.forEach((ep) => {
-    ep.isActiveNow = ep._lastIndex === lastValidIndex;
+  if (validSteps.length === 0) { return []; }
+
+  const sampleStep = estimateTypicalStepMs(times, tStart, tEnd);
+  const maxGapMs = resolveDisconnectThresholdMs(sampleStep, disconnectThreshold);
+
+  let lastValidIndex = -1;
+  for (let i = values.length - 1; i >= 0; i--) {
+    const v = values[i];
+    if (v !== null && v !== undefined && (v as any) !== '' && !isNaN(Number(v))) {
+      lastValidIndex = i;
+      break;
+    }
+  }
+
+  const allEpisodes: AlertEpisode[] = [];
+
+  // Passagem independente do início ao fim da série para cada step configurado
+  for (const step of validSteps) {
+    let current: AlertEpisode | null = null;
+    const close = () => {
+      if (current) {
+        current.isActiveNow = current._lastIndex === lastValidIndex;
+        allEpisodes.push(current);
+        current = null;
+      }
+    };
+
+    for (let i = 0; i < values.length; i++) {
+      const rawVal = values[i];
+
+      // Valor inválido/inexistente quebra a continuidade do episódio
+      if (rawVal === null || rawVal === undefined || (rawVal as any) === '' || isNaN(Number(rawVal))) {
+        close();
+        continue;
+      }
+
+      const value = Number(rawVal);
+      const violates = exactMatch
+        ? Math.abs(value - step.value) < 1e-6
+        : value >= step.value;
+
+      if (!violates) {
+        close();
+        continue;
+      }
+
+      const ptTime = times[i] !== undefined ? times[i] : (tStart + i * sampleStep);
+      let nextPtTime: number;
+      let hasGapAfter = false;
+      if (i + 1 < times.length && times[i + 1] !== undefined && times[i + 1] > ptTime) {
+        const dt = times[i + 1] - ptTime;
+        if (dt > maxGapMs) {
+          nextPtTime = ptTime + sampleStep;
+          hasGapAfter = true;
+        } else {
+          nextPtTime = times[i + 1];
+        }
+      } else if (ptTime < tEnd) {
+        const dtEnd = tEnd - ptTime;
+        nextPtTime = dtEnd > maxGapMs ? (ptTime + sampleStep) : tEnd;
+      } else {
+        nextPtTime = ptTime + sampleStep;
+      }
+
+      const from = Math.max(ptTime, tStart);
+      const to = Math.max(nextPtTime, from + 1);
+
+      if (current) {
+        current.endTs = to;
+        current.durationMs += to - from;
+        current._sum += value;
+        current._count += 1;
+        current._lastIndex = i;
+        current.avgValue = current._sum / current._count;
+        if (value < current.minValue) { current.minValue = value; }
+        if (value > current.maxValue) { current.maxValue = value; }
+      } else {
+        current = {
+          stepValue: step.value,
+          startTs: from,
+          endTs: to,
+          durationMs: to - from,
+          color: step.color,
+          avgValue: value,
+          minValue: value,
+          maxValue: value,
+          isActiveNow: false,
+          _sum: value,
+          _count: 1,
+          _lastIndex: i,
+        };
+      }
+
+      if (hasGapAfter) {
+        // Fecha o episódio antes do período sem dados para não somar horas offline como alerta
+        close();
+      }
+    }
+    close();
+  }
+
+  // Ordenação estrita do array plano unificado:
+  // 1º: Casos isActiveNow === true no topo (ordenados por maior severidade/stepValue)
+  // 2º: Casos encerrados ordenados do mais recente para o mais antigo (b.startTs - a.startTs)
+  return allEpisodes.sort((a, b) => {
+    const aActive = Boolean(a.isActiveNow);
+    const bActive = Boolean(b.isActiveNow);
+
+    if (aActive !== bActive) {
+      return aActive ? -1 : 1;
+    }
+
+    if (aActive && bActive) {
+      return b.stepValue - a.stepValue;
+    }
+
+    if (b.startTs !== a.startTs) {
+      return b.startTs - a.startTs;
+    }
+
+    return b.stepValue - a.stepValue;
   });
-
-  return episodes;
 }
 
 /**
@@ -434,22 +643,33 @@ function getBadgeState(
   tEnd: number,
   _theme: GrafanaTheme2,
   activeThresholdColor?: string | null,
-  exactMatch = false
+  exactMatch = false,
+  disconnectThreshold: DisconnectThresholdMode = 'auto'
 ): BadgeInfo {
   if (!thresholds?.steps?.some((s) => s.value !== null)) {
     return { state: 'normal', color: '', episodes: [] };
   }
 
-  const episodes = getAlertEpisodes(allValues, timeValues, thresholds, tStart, tEnd, exactMatch);
+  const episodes = getAlertEpisodes(allValues, timeValues, thresholds, tStart, tEnd, exactMatch, disconnectThreshold);
+  const activeEpisodes = episodes.filter((ep) => ep.isActiveNow);
 
   // Estado A — isCurrentlyActive: O valor atual (lastVal) viola o threshold agora
   if (lastVal !== null) {
     const currentStep = getActiveNativeThreshold(lastVal, thresholds, exactMatch);
     if (currentStep && currentStep.value !== null) {
-      // Herda exatamente a mesma cor do threshold ativo no momento
-      const color = activeThresholdColor || currentStep.color || '#E24D42';
-      return { state: 'active', color, episodes };
+      // Herda a cor do threshold ativo no momento garantida em hexadecimal válido
+      return { state: 'active', color: resolveAlertHexColor(currentStep.color), episodes };
     }
+  }
+
+  // Se algum episódio foi marcado como ativo agora, herda a cor do step ativo mais severo
+  if (activeEpisodes.length > 0) {
+    const highestActive = activeEpisodes[0]; // episodes já vêm ordenados com o ativo de maior severidade no topo
+    const stepColor = thresholds?.steps?.find(
+      (s) => s.value !== null && Math.abs(Number(s.value) - highestActive.stepValue) < 1e-6
+    )?.color;
+    const color = resolveAlertHexColor(stepColor || highestActive.color || activeThresholdColor);
+    return { state: 'active', color, episodes };
   }
 
   // Estado B — wasActiveInWindow: O valor atual normalizou, mas houve episódios passados na janela
@@ -840,10 +1060,689 @@ function formatTimeDisplay(ts: number, showDate = false): string {
 }
 const formatShortTime = formatTimeDisplay;
 
+// Registro global em ordem de abertura para evitar sobreposição entre popups simultâneos
+const openPopupRegistry: HTMLElement[] = [];
+
+interface AlertWindowStats {
+  totalMs: number;
+  windowMs: number;
+  spansDays: boolean;
+  exactMatch: boolean;
+  formatValue: (v: number) => string;
+}
+
+/**
+ * Gera uma narrativa contextual concisa para a janela de análise com base em 6 cenários lógicos.
+ */
+function getAlertContextSummary(episodes: AlertEpisode[], windowStats: AlertWindowStats): React.ReactNode {
+  if (episodes.length === 0) {
+    return 'Nenhuma violação registrada no período.';
+  }
+
+  const { totalMs, windowMs, spansDays, exactMatch, formatValue } = windowStats;
+  const safeWindowMs = Math.max(windowMs, totalMs, 1);
+  const alertRatio = Math.min(1, totalMs / safeWindowMs);
+  const pct = Math.min(100, Math.round(alertRatio * 100));
+  const op = exactMatch ? '=' : '≥';
+  const hasActive = episodes.some((ep) => ep.isActiveNow);
+  const peakEp = episodes.reduce((prev, curr) => (curr.maxValue > prev.maxValue ? curr : prev), episodes[0]);
+
+  // Agrupa durações por nível de threshold para detectar escalada entre múltiplos níveis
+  const stepTotals = new Map<number, { stepValue: number; durationMs: number; color: string; count: number }>();
+  for (const ep of episodes) {
+    const prev = stepTotals.get(ep.stepValue);
+    if (prev) {
+      prev.durationMs += ep.durationMs;
+      prev.count += 1;
+    } else {
+      stepTotals.set(ep.stepValue, {
+        stepValue: ep.stepValue,
+        durationMs: ep.durationMs,
+        color: ep.color,
+        count: 1,
+      });
+    }
+  }
+  const sortedLevels = [...stepTotals.values()].sort((a, b) => a.stepValue - b.stepValue);
+
+  // Cenário 1: >= 95% do tempo em alerta
+  if (alertRatio >= 0.95) {
+    if (sortedLevels.length >= 2) {
+      const lowest = sortedLevels[0];
+      const highest = sortedLevels[sortedLevels.length - 1];
+      return (
+        <>
+          Permaneceu fora do padrão durante <strong>{pct}%</strong> do período ({op}{' '}
+          <strong style={{ color: lowest.color }}>{formatValue(lowest.stepValue)}</strong>), agravando para {op}{' '}
+          <strong style={{ color: highest.color }}>{formatValue(highest.stepValue)}</strong> por{' '}
+          <strong>{humanDuration(highest.durationMs, 'ms')}</strong>.
+        </>
+      );
+    }
+    return (
+      <>
+        Permaneceu fora do padrão durante <strong>{pct}%</strong> do período analisado (
+        <strong>{humanDuration(totalMs, 'ms')}</strong>), com pico de{' '}
+        <strong style={{ color: peakEp.color }}>{formatValue(peakEp.maxValue)}</strong>.
+      </>
+    );
+  }
+
+  // Cenário 2: Escalada entre múltiplos thresholds
+  if (sortedLevels.length >= 2) {
+    const lowest = sortedLevels[0];
+    const highest = sortedLevels[sortedLevels.length - 1];
+    return (
+      <>
+        Passou <strong>{humanDuration(lowest.durationMs, 'ms')}</strong> {exactMatch ? 'em' : 'acima de'}{' '}
+        <strong style={{ color: lowest.color }}>{formatValue(lowest.stepValue)}</strong>, agravando para{' '}
+        <strong style={{ color: highest.color }}>{formatValue(highest.stepValue)}</strong> por{' '}
+        <strong>{humanDuration(highest.durationMs, 'ms')}</strong>
+        {hasActive ? ' (ainda em aberto).' : '.'}
+      </>
+    );
+  }
+
+  // Cenário 3: Intermitente/Oscilação (5+ casos na janela)
+  if (episodes.length >= 5) {
+    return (
+      <>
+        Comportamento intermitente com <strong>{episodes.length} casos</strong> na janela (acumulando{' '}
+        <strong>{humanDuration(totalMs, 'ms')}</strong> em alerta)
+        {hasActive ? ', permanecendo em aberto agora.' : ', mas operando normalmente agora.'}
+      </>
+    );
+  }
+
+  // Cenário 4: 1 caso apenas e isActiveNow === true
+  if (episodes.length === 1 && episodes[0].isActiveNow) {
+    const ep = episodes[0];
+    return (
+      <>
+        Estável na maior parte do período; entrou em alerta às{' '}
+        <strong>{formatTimeDisplay(ep.startTs, spansDays)}</strong> (há{' '}
+        <strong>{humanDuration(ep.durationMs, 'ms')}</strong>).
+      </>
+    );
+  }
+
+  // Cenário 5: 1 caso apenas e isActiveNow === false
+  if (episodes.length === 1 && !episodes[0].isActiveNow) {
+    const ep = episodes[0];
+    return (
+      <>
+        Operando normalmente agora. Registrou apenas <strong>1 desvio</strong> às{' '}
+        <strong>{formatTimeDisplay(ep.startTs, spansDays)}</strong> ({humanDuration(ep.durationMs, 'ms')}).
+      </>
+    );
+  }
+
+  // Cenário 6: Poucas ocorrências (2 a 4 casos)
+  return (
+    <>
+      {hasActive ? (
+        <>
+          Registrou <strong>{episodes.length} ocorrências</strong> pontuais na janela (
+          <strong>{humanDuration(totalMs, 'ms')}</strong> acumulados), com alerta em aberto no momento.
+        </>
+      ) : (
+        <>
+          Operando normalmente agora após <strong>{episodes.length} ocorrências</strong> pontuais na janela (
+          <strong>{humanDuration(totalMs, 'ms')}</strong> acumulados).
+        </>
+      )}
+    </>
+  );
+}
+
+export interface AlertInspectPayload {
+  badge: BadgeInfo;
+  tStart: number;
+  tEnd: number;
+  field: Field;
+  theme: GrafanaTheme2;
+  exactMatch?: boolean;
+  fieldConfig?: FieldConfigSource;
+  metricLabel: string;
+  currentValueText: string;
+  currentValueColor?: string;
+}
+
+/**
+ * Aba Lateral Esquerda (Left Side Drawer) renderizada via createPortal em document.body.
+ * Escuta globalmente o evento 'vale-stat-alert-inspect' para troca rápida entre métricas
+ * sem abrir novos pop-ups flutuantes.
+ */
+const AlertLeftDrawer: React.FC<{
+  initialPayload: AlertInspectPayload;
+  onCollapse: () => void;
+  onClose: () => void;
+}> = ({ initialPayload, onCollapse, onClose }) => {
+  const [payload, setPayload] = useState<AlertInspectPayload>(initialPayload);
+  const [activeFilter, setActiveFilter] = useState<'all' | 'active' | number>('all');
+  const [entered, setEntered] = useState(false);
+
+  // Sincroniza caso a própria métrica de origem sofra atualização de dados em tempo real
+  useEffect(() => {
+    setPayload((prev) => {
+      if (prev.field?.name === initialPayload.field?.name && prev.metricLabel === initialPayload.metricLabel) {
+        return initialPayload;
+      }
+      return prev;
+    });
+  }, [initialPayload]);
+
+  // Transição suave de entrada (translateX)
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => setEntered(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  // Barramento de Eventos Global: intercepta cliques em outros badges '!' enquanto o Drawer estiver aberto
+  useEffect(() => {
+    const handleInspect = (evt: Event) => {
+      const customEvt = evt as CustomEvent<AlertInspectPayload>;
+      if (customEvt.detail) {
+        evt.preventDefault(); // Sinaliza ao emissor que a Aba Lateral interceptou o evento
+        setPayload(customEvt.detail);
+        setActiveFilter('all');
+      }
+    };
+    window.addEventListener('vale-stat-alert-inspect', handleInspect);
+    return () => {
+      window.removeEventListener('vale-stat-alert-inspect', handleInspect);
+    };
+  }, []);
+
+  // Fechar com Escape
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
+  const { badge, tStart, tEnd, field, theme, exactMatch = false, fieldConfig, metricLabel, currentValueText, currentValueColor } = payload;
+
+  const formatValue = useCallback((v: number) => formatFieldValue(v, field, theme).text, [field, theme]);
+  const liveThresholds = getFieldThresholds(field, theme, fieldConfig);
+
+  const resolvedEpisodes = useMemo(() => {
+    return badge.episodes.map((ep) => {
+      const numStepVal = Number(ep.stepValue);
+      const matchingStep = liveThresholds?.steps.find(
+        (s) => s.value !== null && s.value !== undefined && Math.abs(Number(s.value) - numStepVal) < 1e-6
+      );
+      const color = resolveAlertHexColor(matchingStep?.color || ep.color || badge.color);
+      return { ...ep, color };
+    });
+  }, [badge.episodes, badge.color, liveThresholds]);
+
+  const totalMs = useMemo(() => {
+    if (resolvedEpisodes.length === 0) { return 0; }
+    const intervals = resolvedEpisodes
+      .map((ep) => ({ start: ep.startTs, end: ep.endTs }))
+      .sort((a, b) => a.start - b.start);
+    const merged: Array<{ start: number; end: number }> = [intervals[0]];
+    for (let i = 1; i < intervals.length; i++) {
+      const last = merged[merged.length - 1];
+      const curr = intervals[i];
+      if (curr.start <= last.end) {
+        last.end = Math.max(last.end, curr.end);
+      } else {
+        merged.push({ ...curr });
+      }
+    }
+    return merged.reduce((acc, iv) => acc + Math.max(0, iv.end - iv.start), 0);
+  }, [resolvedEpisodes]);
+
+  const spansDays = new Date(tStart).toDateString() !== new Date(tEnd).toDateString();
+  const activeEpisode = resolvedEpisodes.find((ep) => ep.isActiveNow);
+  const peakEpisode = resolvedEpisodes.length > 0
+    ? resolvedEpisodes.reduce((prev, curr) => (curr.maxValue > prev.maxValue ? curr : prev), resolvedEpisodes[0])
+    : undefined;
+  const headerColor = badge.state === 'active'
+    ? resolveAlertHexColor(activeEpisode?.color || badge.color)
+    : '#EAB839';
+
+  const narrativeSummary = useMemo(
+    () =>
+      getAlertContextSummary(resolvedEpisodes, {
+        totalMs,
+        windowMs: Math.max(0, tEnd - tStart),
+        spansDays,
+        exactMatch,
+        formatValue,
+      }),
+    [resolvedEpisodes, totalMs, tStart, tEnd, spansDays, exactMatch, formatValue]
+  );
+
+  // Níveis únicos de threshold para as pílulas de filtro rápido
+  const uniqueThresholdSteps = useMemo(() => {
+    const map = new Map<number, string>();
+    resolvedEpisodes.forEach((ep) => {
+      if (!map.has(ep.stepValue)) {
+        map.set(ep.stepValue, ep.color);
+      }
+    });
+    return [...map.entries()]
+      .map(([stepValue, color]) => ({ stepValue, color }))
+      .sort((a, b) => a.stepValue - b.stepValue);
+  }, [resolvedEpisodes]);
+
+  const activeCount = useMemo(() => resolvedEpisodes.filter((ep) => ep.isActiveNow).length, [resolvedEpisodes]);
+
+  const filteredEpisodes = useMemo(() => {
+    if (activeFilter === 'all') {
+      return resolvedEpisodes;
+    }
+    if (activeFilter === 'active') {
+      return resolvedEpisodes.filter((ep) => ep.isActiveNow);
+    }
+    return resolvedEpisodes.filter((ep) => Math.abs(ep.stepValue - activeFilter) < 1e-6);
+  }, [resolvedEpisodes, activeFilter]);
+
+  const statCell = (label: string, value: string, extra: React.CSSProperties = {}, valueStyle: React.CSSProperties = {}) => (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, ...extra }}>
+      <span style={{ fontSize: 9, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</span>
+      <span style={{ fontWeight: 600, fontSize: 11, ...valueStyle }}>{value}</span>
+    </div>
+  );
+
+  const iconBtnStyle: React.CSSProperties = {
+    width: 24,
+    height: 24,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 5,
+    border: '1px solid rgba(255,255,255,0.09)',
+    background: 'rgba(255,255,255,0.04)',
+    color: '#e2e8f0',
+    cursor: 'pointer',
+    opacity: 0.7,
+    padding: 0,
+    transition: 'opacity 0.15s ease, background-color 0.15s ease',
+    flexShrink: 0,
+  };
+
+  const renderPill = (
+    key: string,
+    label: string,
+    isSelected: boolean,
+    onClick: () => void,
+    accentColor = '#38bdf8'
+  ) => (
+    <button
+      key={key}
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      style={{
+        padding: '3px 9px',
+        borderRadius: 999,
+        fontSize: 10.5,
+        fontWeight: isSelected ? 700 : 500,
+        cursor: 'pointer',
+        whiteSpace: 'nowrap',
+        transition: 'all 0.15s ease',
+        color: isSelected ? accentColor : 'rgba(226,232,240,0.72)',
+        background: isSelected ? parseColorToRgba(accentColor, 0.16) : 'rgba(255,255,255,0.04)',
+        border: `1px solid ${isSelected ? parseColorToRgba(accentColor, 0.45) : 'rgba(255,255,255,0.08)'}`,
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  return createPortal(
+    <div
+      data-alert-left-drawer="true"
+      data-alert-popup="true"
+      onClick={(e) => e.stopPropagation()}
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        bottom: 0,
+        width: 380,
+        maxWidth: '90vw',
+        zIndex: 99999,
+        background: 'rgba(11, 16, 22, 0.98)',
+        backdropFilter: 'blur(14px)',
+        WebkitBackdropFilter: 'blur(14px)',
+        borderRight: `1px solid color-mix(in srgb, ${headerColor} 32%, rgba(255,255,255,0.1))`,
+        boxShadow: '12px 0 36px rgba(0,0,0,0.75)',
+        display: 'flex',
+        flexDirection: 'column',
+        color: '#e2e8f0',
+        fontSize: 12,
+        lineHeight: 1.5,
+        pointerEvents: 'all',
+        transform: entered ? 'translateX(0)' : 'translateX(-100%)',
+        transition: 'transform 0.22s cubic-bezier(0.16, 1, 0.3, 1)',
+      }}
+    >
+      {/* 1. Header da Aba Lateral */}
+      <div
+        style={{
+          flexShrink: 0,
+          padding: '14px 16px 12px',
+          borderBottom: '1px solid rgba(255,255,255,0.08)',
+          background: 'rgba(255,255,255,0.018)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+            {badge.state === 'active' ? (
+              <Icon name="exclamation-triangle" size="sm" style={{ color: headerColor, flexShrink: 0 }} />
+            ) : (
+              <HistoryAlertIcon size={16} color={headerColor} />
+            )}
+            <span
+              style={{
+                fontWeight: 700,
+                fontSize: 13.5,
+                color: '#f8fafc',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+              title={metricLabel}
+            >
+              {metricLabel}
+            </span>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+            <span
+              style={{
+                fontWeight: 800,
+                fontSize: 14,
+                color: currentValueColor || headerColor,
+                padding: '1px 7px',
+                borderRadius: 4,
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.08)',
+              }}
+            >
+              {currentValueText}
+            </span>
+            <button
+              type="button"
+              title="Recolher para pop-up flutuante"
+              style={iconBtnStyle}
+              onClick={(e) => {
+                e.stopPropagation();
+                onCollapse();
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.opacity = '1';
+                e.currentTarget.style.background = 'rgba(255,255,255,0.12)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.opacity = '0.7';
+                e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
+              }}
+            >
+              <Icon name="arrow-left" size="sm" />
+            </button>
+            <button
+              type="button"
+              title="Fechar (Esc)"
+              style={{ ...iconBtnStyle, fontSize: 16, fontWeight: 600, lineHeight: 1 }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onClose();
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.opacity = '1';
+                e.currentTarget.style.background = 'rgba(255,255,255,0.12)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.opacity = '0.7';
+                e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
+              }}
+            >
+              ×
+            </button>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 11, opacity: 0.65 }}>
+          <span>
+            Janela: {formatShortTime(tStart, spansDays)} – {formatShortTime(tEnd, spansDays)}
+          </span>
+          <span style={{ color: headerColor, fontWeight: 600 }}>
+            {badge.state === 'active' ? '● Alerta em aberto' : 'Normalizado'}
+          </span>
+        </div>
+      </div>
+
+      {/* 2. Bloco de Resumo (Visão Geral do Período) */}
+      <div style={{ flexShrink: 0, padding: '12px 16px 0' }}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            padding: '10px 12px',
+            borderRadius: 6,
+            background: 'rgba(255,255,255,0.03)',
+            border: '1px solid rgba(255,255,255,0.08)',
+          }}
+        >
+          <div style={{ fontSize: 11.5, lineHeight: 1.45, color: 'rgba(226, 232, 240, 0.94)' }}>
+            {narrativeSummary}
+          </div>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1.35fr 1fr',
+              gap: 4,
+              padding: '6px 8px',
+              borderRadius: 4,
+              background: 'rgba(0,0,0,0.28)',
+            }}
+          >
+            {statCell('Total de Casos', `${resolvedEpisodes.length}`, {}, { fontWeight: 700, color: '#e2e8f0' })}
+            {statCell(
+              'Tempo em Alerta',
+              humanDuration(totalMs, 'ms'),
+              { borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' },
+              { fontWeight: 700, color: headerColor }
+            )}
+            {statCell(
+              'Pico Máximo',
+              peakEpisode ? formatValue(peakEpisode.maxValue) : '—',
+              {},
+              { fontWeight: 700, color: peakEpisode?.color || headerColor }
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* 3. Barra de Filtros Rápidos (Pílulas clicáveis) */}
+      <div
+        style={{
+          flexShrink: 0,
+          padding: '10px 16px',
+          borderBottom: '1px solid rgba(255,255,255,0.07)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          flexWrap: 'wrap',
+        }}
+      >
+        {renderPill(
+          'all',
+          `Todos (${resolvedEpisodes.length})`,
+          activeFilter === 'all',
+          () => setActiveFilter('all'),
+          '#38bdf8'
+        )}
+        {renderPill(
+          'active',
+          `Em aberto (${activeCount})`,
+          activeFilter === 'active',
+          () => setActiveFilter('active'),
+          activeEpisode?.color || '#E24D42'
+        )}
+        {uniqueThresholdSteps.map((st) =>
+          renderPill(
+            `step-${st.stepValue}`,
+            `${exactMatch ? '=' : '>='} ${formatValue(st.stepValue)}`,
+            activeFilter === st.stepValue,
+            () => setActiveFilter(st.stepValue),
+            st.color
+          )
+        )}
+      </div>
+
+      {/* 4. Lista de Casos ocupando o resto do 100vh */}
+      <div
+        style={{
+          flex: 1,
+          overflowY: 'auto',
+          padding: '12px 16px 16px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+        }}
+      >
+        {filteredEpisodes.length === 0 ? (
+          <div
+            style={{
+              padding: '24px 12px',
+              textAlign: 'center',
+              opacity: 0.55,
+              fontSize: 11.5,
+              borderRadius: 6,
+              background: 'rgba(255,255,255,0.02)',
+              border: '1px dashed rgba(255,255,255,0.08)',
+            }}
+          >
+            Nenhum caso corresponde ao filtro selecionado.
+          </div>
+        ) : (
+          filteredEpisodes.map((ep, idx) => (
+            <div
+              key={`${ep.stepValue}-${ep.startTs}-${idx}`}
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 6,
+                padding: '9px 11px',
+                borderRadius: 6,
+                background: ep.isActiveNow ? parseColorToRgba(ep.color, 0.08) : 'rgba(255,255,255,0.025)',
+                border: `1px solid ${ep.isActiveNow ? parseColorToRgba(ep.color, 0.32) : 'rgba(255,255,255,0.06)'}`,
+                borderLeft: `3px solid ${ep.color}`,
+                flexShrink: 0,
+              }}
+            >
+              {/* Cabeçalho do Card */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+                <span style={{ fontWeight: 700, fontSize: 11, color: ep.color }}>
+                  Threshold {exactMatch ? '=' : '≥'} {formatValue(ep.stepValue)}
+                </span>
+                {ep.isActiveNow ? (
+                  <span
+                    style={{
+                      fontSize: 9,
+                      fontWeight: 800,
+                      color: ep.color,
+                      backgroundColor: parseColorToRgba(ep.color, 0.16),
+                      border: `1px solid ${parseColorToRgba(ep.color, 0.38)}`,
+                      padding: '1px 5px',
+                      borderRadius: 3,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.04em',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    ● EM ABERTO
+                  </span>
+                ) : (
+                  <span
+                    style={{
+                      fontSize: 9,
+                      fontWeight: 600,
+                      color: 'rgba(255,255,255,0.6)',
+                      backgroundColor: 'rgba(255,255,255,0.06)',
+                      padding: '1px 5px',
+                      borderRadius: 3,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.04em',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    NORMALIZADO
+                  </span>
+                )}
+              </div>
+
+              {/* Tempos */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 11 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <span style={{ opacity: 0.7 }}>Início:</span>
+                  <span style={{ fontWeight: 600 }}>{formatTimeDisplay(ep.startTs, spansDays)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <span style={{ opacity: 0.7 }}>Normalização:</span>
+                  {ep.isActiveNow ? (
+                    <span style={{ color: ep.color, fontWeight: 700 }}>Ainda em aberto</span>
+                  ) : (
+                    <span style={{ fontWeight: 600 }}>{formatTimeDisplay(ep.endTs, spansDays)}</span>
+                  )}
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <span style={{ opacity: 0.7 }}>Duração:</span>
+                  <span style={{ fontWeight: 600 }}>{humanDuration(ep.durationMs, 'ms')}</span>
+                </div>
+              </div>
+
+              {/* Base do Card: 3 colunas compactas (Pico, Média, Mínimo) */}
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr 1fr',
+                  gap: 4,
+                  marginTop: 2,
+                  padding: '4px 6px',
+                  borderRadius: 4,
+                  background: 'rgba(0,0,0,0.22)',
+                }}
+              >
+                {statCell('Pico', formatValue(ep.maxValue), {}, { fontWeight: 700, color: ep.color })}
+                {statCell(
+                  'Média',
+                  formatValue(ep.avgValue),
+                  { borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' }
+                )}
+                {statCell('Mínimo', formatValue(ep.minValue), {}, { opacity: 0.85 })}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>,
+    document.body
+  );
+};
+
 /**
  * Portal do popup: renderiza diretamente em document.body via createPortal,
  * escapando do overflow:hidden do painel Grafana. A posição é calculada
- * com getBoundingClientRect() do botão de trigger.
+ * com getBoundingClientRect() do botão de trigger e ajustada para nunca
+ * sobrepor outros popups já abertos.
  */
 const AlertPopupPortal: React.FC<{
   badge: BadgeInfo;
@@ -852,49 +1751,157 @@ const AlertPopupPortal: React.FC<{
   triggerRect: DOMRect;
   isPinned: boolean;
   onClose: () => void;
+  onExpand: () => void;
   formatValue: (v: number) => string;
   exactMatch?: boolean;
   field: Field;
   theme: GrafanaTheme2;
   fieldConfig?: FieldConfigSource;
-}> = ({ badge, tStart, tEnd, triggerRect, isPinned, onClose, formatValue, exactMatch = false, field, theme, fieldConfig }) => {
+}> = ({ badge, tStart, tEnd, triggerRect, onClose, onExpand, formatValue, exactMatch = false, field, theme, fieldConfig }) => {
   const popupRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ top: 0, left: 0, opacity: 0 });
 
-  const totalMs = badge.episodes.reduce((acc, ep) => acc + ep.durationMs, 0);
+  // Calcula o tempo total em alerta unindo intervalos sobrepostos (evita somar duplicado quando >=40% e >=50% ocorrem juntos)
+  const totalMs = useMemo(() => {
+    if (badge.episodes.length === 0) { return 0; }
+    const intervals = badge.episodes
+      .map((ep) => ({ start: ep.startTs, end: ep.endTs }))
+      .sort((a, b) => a.start - b.start);
+    const merged: Array<{ start: number; end: number }> = [intervals[0]];
+    for (let i = 1; i < intervals.length; i++) {
+      const last = merged[merged.length - 1];
+      const curr = intervals[i];
+      if (curr.start <= last.end) {
+        last.end = Math.max(last.end, curr.end);
+      } else {
+        merged.push({ ...curr });
+      }
+    }
+    return merged.reduce((acc, iv) => acc + Math.max(0, iv.end - iv.start), 0);
+  }, [badge.episodes]);
 
-  // Calcular posição real na tela após montar (para saber largura/altura real do popup)
-  useEffect(() => {
-    if (!popupRef.current) return;
+  // Registro de montagem do popup para coordenação de não-sobreposição
+  useLayoutEffect(() => {
+    const el = popupRef.current;
+    if (!el) { return; }
+    if (!openPopupRegistry.includes(el)) {
+      openPopupRegistry.push(el);
+    }
+    return () => {
+      const idx = openPopupRegistry.indexOf(el);
+      if (idx !== -1) {
+        openPopupRegistry.splice(idx, 1);
+      }
+    };
+  }, []);
+
+  // Calcular posição real na tela após montar, garantindo que o popup NUNCA fique sobre o botão trigger
+  useLayoutEffect(() => {
+    if (!popupRef.current) { return; }
     const popup = popupRef.current;
     const popupW = popup.offsetWidth;
     const popupH = popup.offsetHeight;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
+    const MARGIN = 8;
+    const GAP = 8;
 
-    // Preferência: aparecer ACIMA e alinhado à direita do botão
-    let top = triggerRect.top - popupH - 8;
-    let left = triggerRect.right - popupW;
+    const clampHoriz = (l: number) => Math.max(MARGIN, Math.min(l, Math.max(MARGIN, vw - popupW - MARGIN)));
+    const clampVert = (t: number) => Math.max(MARGIN, Math.min(t, Math.max(MARGIN, vh - popupH - MARGIN)));
 
-    // Se cortar no topo, aparecer abaixo
-    if (top < 8) {
-      top = triggerRect.bottom + 8;
-    }
-    // Se cortar na direita, alinhar à esquerda do botão
-    if (left + popupW > vw - 8) {
-      left = vw - popupW - 8;
-    }
-    // Se cortar na esquerda, travar na borda
-    if (left < 8) {
-      left = 8;
-    }
-    // Se cortar embaixo, subir
-    if (top + popupH > vh - 8) {
-      top = vh - popupH - 8;
+    // Preferência natural: ACIMA do botão e alinhado à sua direita
+    const prefAboveTop = triggerRect.top - popupH - GAP;
+    const prefBelowTop = triggerRect.bottom + GAP;
+    const prefRightLeft = triggerRect.right - popupW;
+
+    // Coleta retângulos de popups abertos anteriormente
+    const myIdx = openPopupRegistry.indexOf(popup);
+    const priorPopups = (myIdx > 0 ? openPopupRegistry.slice(0, myIdx) : [])
+      .filter((el) => el !== popup && document.body.contains(el) && el.offsetWidth > 0 && el.offsetHeight > 0)
+      .map((el) => el.getBoundingClientRect());
+
+    document.querySelectorAll('[data-alert-popup="true"]').forEach((el) => {
+      const htmlEl = el as HTMLElement;
+      if (htmlEl !== popup && !openPopupRegistry.includes(htmlEl) && htmlEl.offsetWidth > 0 && htmlEl.offsetHeight > 0) {
+        priorPopups.push(htmlEl.getBoundingClientRect());
+      }
+    });
+
+    const getOverlapArea = (t: number, l: number, rects: DOMRect[], pad = 0): number => {
+      let area = 0;
+      for (const r of rects) {
+        const xOverlap = Math.max(0, Math.min(l + popupW + pad, r.right + pad) - Math.max(l, r.left));
+        const yOverlap = Math.max(0, Math.min(t + popupH + pad, r.bottom + pad) - Math.max(t, r.top));
+        area += xOverlap * yOverlap;
+      }
+      return area;
+    };
+
+    // Gera candidatos que procuram ficar fora do botão trigger
+    const rawCandidates: Array<{ top: number; left: number }> = [];
+
+    // 1. Acima do botão (se couber sem invadir o botão)
+    if (prefAboveTop >= MARGIN) {
+      rawCandidates.push({ top: prefAboveTop, left: clampHoriz(prefRightLeft) });
+      rawCandidates.push({ top: prefAboveTop, left: clampHoriz(triggerRect.left) });
     }
 
-    setPos({ top, left, opacity: 1 });
-  }, [triggerRect]);
+    // 2. Abaixo do botão (se couber sem invadir o botão)
+    if (prefBelowTop + popupH <= vh - MARGIN) {
+      rawCandidates.push({ top: prefBelowTop, left: clampHoriz(prefRightLeft) });
+      rawCandidates.push({ top: prefBelowTop, left: clampHoriz(triggerRect.left) });
+    }
+
+    // 3. À esquerda do botão (horizontalmente livre do trigger)
+    if (triggerRect.left - popupW - GAP >= MARGIN) {
+      rawCandidates.push({ top: clampVert(triggerRect.top), left: triggerRect.left - popupW - GAP });
+      rawCandidates.push({ top: clampVert(triggerRect.top + 11 - popupH / 2), left: triggerRect.left - popupW - GAP });
+    }
+
+    // 4. À direita do botão (horizontalmente livre do trigger)
+    if (triggerRect.right + GAP + popupW <= vw - MARGIN) {
+      rawCandidates.push({ top: clampVert(triggerRect.top), left: triggerRect.right + GAP });
+      rawCandidates.push({ top: clampVert(triggerRect.top + 11 - popupH / 2), left: triggerRect.right + GAP });
+    }
+
+    // 5. Fallbacks padrão clampados
+    rawCandidates.push(
+      { top: clampVert(prefAboveTop), left: clampHoriz(prefRightLeft) },
+      { top: clampVert(prefBelowTop), left: clampHoriz(prefRightLeft) },
+      { top: clampVert(triggerRect.top), left: clampHoriz(triggerRect.left - popupW - GAP) },
+      { top: clampVert(triggerRect.top), left: clampHoriz(triggerRect.right + GAP) }
+    );
+
+    // Candidatos adjacentes a popups já abertos
+    for (const r of priorPopups) {
+      rawCandidates.push(
+        { top: clampVert(r.top), left: clampHoriz(r.left - popupW - GAP) },
+        { top: clampVert(r.top), left: clampHoriz(r.right + GAP) },
+        { top: clampVert(r.bottom + GAP), left: clampHoriz(r.left) },
+        { top: clampVert(r.top - popupH - GAP), left: clampHoriz(r.left) }
+      );
+    }
+
+    let best = rawCandidates[0];
+    let bestScore = Infinity;
+
+    for (const cand of rawCandidates) {
+      const c = { top: clampVert(cand.top), left: clampHoriz(cand.left) };
+      // Penalidade extrema se cobrir qualquer pixel do botão trigger (com 6px de folga para respiro de clique)
+      const triggerOverlap = getOverlapArea(c.top, c.left, [triggerRect], 6);
+      const priorOverlap = getOverlapArea(c.top, c.left, priorPopups, GAP);
+      const dist = Math.hypot(c.top - (prefAboveTop >= MARGIN ? prefAboveTop : prefBelowTop), c.left - prefRightLeft);
+
+      // triggerOverlap recebe peso de 10 milhões para NUNCA ficar em cima do botão de exclamação
+      const score = (triggerOverlap > 0 ? 10000000 + triggerOverlap * 1000 : 0) + priorOverlap * 10000 + dist;
+      if (score < bestScore) {
+        bestScore = score;
+        best = c;
+      }
+    }
+
+    setPos({ top: best.top, left: best.left, opacity: 1 });
+  }, [triggerRect, badge.episodes.length]);
 
   // Fechar com Escape
   useEffect(() => {
@@ -908,52 +1915,17 @@ const AlertPopupPortal: React.FC<{
   // Thresholds dinâmicos atuais do campo para manter as cores do popup 100% atualizadas
   const liveThresholds = getFieldThresholds(field, theme, fieldConfig);
 
-  // ── Agrupamento em sessões por severidade ────────────────────────────────
-  // Cada sessão = um step de threshold. Dentro dela, as ocorrências individuais
-  // ordenadas com o evento "em andamento" no topo, seguido pelas mais recentes.
-  interface AlertSection {
-    stepValue: number;
-    color: string;
-    episodes: AlertEpisode[];
-    isActiveNow: boolean;
-    totalMs: number;
-  }
-  const sectionMap = new Map<number, AlertSection>();
-  badge.episodes.forEach((ep) => {
-    const numStepVal = Number(ep.stepValue);
-    // Resolução dinâmica de cor do threshold para esta severidade
-    const matchingStep = liveThresholds?.steps.find(
-      (s) => s.value !== null && s.value !== undefined && Math.abs(Number(s.value) - numStepVal) < 1e-6
-    );
-    const resolvedColor = matchingStep?.color || ep.color || badge.color;
-
-    let sec = sectionMap.get(numStepVal);
-    if (!sec) {
-      sec = { stepValue: numStepVal, color: resolvedColor, episodes: [], isActiveNow: false, totalMs: 0 };
-      sectionMap.set(numStepVal, sec);
-    } else {
-      sec.color = resolvedColor;
-    }
-    ep.color = resolvedColor;
-    sec.episodes.push(ep);
-    sec.totalMs += ep.durationMs;
-    if (ep.isActiveNow) { sec.isActiveNow = true; }
-  });
-
-  const sections = [...sectionMap.values()].sort((a, b) => {
-    if (a.isActiveNow !== b.isActiveNow) { return a.isActiveNow ? -1 : 1; }
-    return b.stepValue - a.stepValue;
-  });
-
-  // Ocorrência ativa em andamento (isActiveNow) SEMPRE primeiro; as demais em ordem decrescente (mais recente primeiro)
-  sections.forEach((s) =>
-    s.episodes.sort((a, b) => {
-      if (a.isActiveNow !== b.isActiveNow) {
-        return a.isActiveNow ? -1 : 1;
-      }
-      return b.startTs - a.startTs;
-    })
-  );
+  // Lista plana unificada mantendo a ordenação estrita de getAlertEpisodes e cores hexadecimais válidas
+  const resolvedEpisodes = useMemo(() => {
+    return badge.episodes.map((ep) => {
+      const numStepVal = Number(ep.stepValue);
+      const matchingStep = liveThresholds?.steps.find(
+        (s) => s.value !== null && s.value !== undefined && Math.abs(Number(s.value) - numStepVal) < 1e-6
+      );
+      const color = resolveAlertHexColor(matchingStep?.color || ep.color || badge.color);
+      return { ...ep, color };
+    });
+  }, [badge.episodes, badge.color, liveThresholds]);
 
   const spansDays = new Date(tStart).toDateString() !== new Date(tEnd).toDateString();
 
@@ -964,174 +1936,48 @@ const AlertPopupPortal: React.FC<{
     </div>
   );
 
-  const renderOccurrence = (ep: AlertEpisode, idx: number, isLast: boolean, color: string) => (
-    <div
-      key={`${ep.stepValue}-${ep.startTs}`}
-      style={{
-        display: 'flex', flexDirection: 'column', gap: 3,
-        paddingBottom: isLast ? 0 : 8, marginBottom: isLast ? 0 : 8,
-        borderBottom: isLast ? 'none' : '1px solid rgba(255,255,255,0.06)',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ width: 7, height: 7, borderRadius: '50%', backgroundColor: color, display: 'inline-block', flexShrink: 0 }} />
-          <span style={{ fontWeight: 600, opacity: 0.8, fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            Caso {idx + 1}
-          </span>
-        </div>
-        {ep.isActiveNow ? (
-          <span
-            style={{
-              fontSize: 9,
-              fontWeight: 700,
-              color,
-              backgroundColor: parseColorToRgba(color, 0.15),
-              border: `1px solid ${parseColorToRgba(color, 0.35)}`,
-              padding: '1px 5px',
-              borderRadius: 3,
-              textTransform: 'uppercase',
-              letterSpacing: '0.04em',
-            }}
-          >
-            ● Em andamento
-          </span>
-        ) : (
-          <span
-            style={{
-              fontSize: 9,
-              opacity: 0.6,
-              backgroundColor: 'rgba(255,255,255,0.05)',
-              padding: '1px 5px',
-              borderRadius: 3,
-              textTransform: 'uppercase',
-              letterSpacing: '0.04em',
-            }}
-          >
-            Encerrado
-          </span>
-        )}
-      </div>
-      <div><strong>Início:</strong> {formatTimeDisplay(ep.startTs, spansDays)}</div>
-      <div>
-        <strong>Encerramento:</strong>{' '}
-        {ep.isActiveNow ? (
-          <span style={{ color, fontWeight: 700 }}>Em andamento (ativo agora)</span>
-        ) : (
-          <span style={{ fontWeight: 600 }}>{formatTimeDisplay(ep.endTs, spansDays)}</span>
-        )}
-      </div>
-      <div><strong>Duração:</strong> {humanDuration(ep.durationMs, 'ms')}</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4, marginTop: 3, padding: '5px 6px', borderRadius: 5, background: 'rgba(255,255,255,0.04)' }}>
-        {statCell('Pico', formatValue(ep.maxValue), {}, { fontWeight: 700, color })}
-        {statCell('Média', formatValue(ep.avgValue), { borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' })}
-        {statCell('Mínimo', formatValue(ep.minValue), {}, { opacity: 0.8 })}
-      </div>
-    </div>
-  );
-
-  const renderSection = (sec: AlertSection) => (
-    <div
-      key={sec.stepValue}
-      style={{
-        display: 'flex', flexDirection: 'column', gap: 6,
-        padding: '8px 10px',
-        borderRadius: 6,
-        background: sec.isActiveNow ? parseColorToRgba(sec.color, 0.08) : 'rgba(255,255,255,0.025)',
-        border: `1px solid color-mix(in srgb, ${sec.color} ${sec.isActiveNow ? 45 : 25}%, rgba(255,255,255,0.06))`,
-        borderLeft: `4px solid ${sec.color}`,
-      }}
-    >
-      {/* Cabeçalho da sessão */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-          <span style={{ fontWeight: 700, fontSize: 11, color: sec.color, whiteSpace: 'nowrap' }}>
-            Threshold {exactMatch ? '=' : '≥'} {formatValue(sec.stepValue)}
-          </span>
-          <span style={{ fontSize: 10, opacity: 0.6, whiteSpace: 'nowrap' }}>
-            {sec.episodes.length} {sec.episodes.length === 1 ? 'ocorrência' : 'ocorrências'} · {humanDuration(sec.totalMs, 'ms')}
-          </span>
-        </div>
-        {sec.isActiveNow ? (
-          <span
-            style={{
-              fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em',
-              color: sec.color,
-              background: parseColorToRgba(sec.color, 0.18),
-              border: `1px solid ${parseColorToRgba(sec.color, 0.4)}`,
-              padding: '1px 5px', borderRadius: 3, whiteSpace: 'nowrap',
-            }}
-          >
-            Ativo agora
-          </span>
-        ) : (
-          <span style={{ fontSize: 9, opacity: 0.55, textTransform: 'uppercase', letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>
-            Registrado
-          </span>
-        )}
-      </div>
-      {/* Ocorrências detalhadas */}
-      <div style={{ display: 'flex', flexDirection: 'column' }}>
-        {sec.episodes.map((ep, i) => renderOccurrence(ep, i, i === sec.episodes.length - 1, sec.color))}
-      </div>
-    </div>
-  );
-
-  let content: React.ReactNode = null;
-
-  if (badge.episodes.length > 0) {
-    const totalWeightedSum = badge.episodes.reduce((acc, ep) => acc + ep.avgValue * ep.durationMs, 0);
-    const overallAvg = totalMs > 0 ? totalWeightedSum / totalMs : 0;
-    const peakEpisode = badge.episodes.reduce((prev, curr) => (curr.maxValue > prev.maxValue ? curr : prev), badge.episodes[0]);
-    const overallMax = peakEpisode.maxValue;
-    const overallMin = Math.min(...badge.episodes.map((ep) => ep.minValue));
-    const peakColor = peakEpisode.color || badge.color;
-    const showOverall = badge.episodes.length > 1;
-    const headerColor = badge.state === 'active'
-      ? (sections.find((s) => s.isActiveNow)?.color || badge.color)
-      : '#EAB839';
-
-    content = (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ color: headerColor, fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
-          {badge.state === 'active' ? (
-            <Icon name="exclamation-triangle" size="sm" style={{ color: headerColor, flexShrink: 0 }} />
-          ) : (
-            <HistoryAlertIcon size={15} color={headerColor} />
-          )}
-          {badge.state === 'active'
-            ? (sections.length > 1 ? 'Thresholds excedidos' : 'Threshold excedido')
-            : 'Excursão registrada na janela (Normalizado)'}
-        </div>
-        {showOverall && (
-          <div style={{ opacity: 0.6, fontSize: 11 }}>
-            Janela de amostra do gráfico: {formatShortTime(tStart, spansDays)} – {formatShortTime(tEnd, spansDays)}
-          </div>
-        )}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {sections.map(renderSection)}
-        </div>
-        {showOverall && (
-          <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 8, marginTop: 2, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div style={{ fontWeight: 600 }}>Total em alerta: {humanDuration(totalMs, 'ms')}</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4, padding: '6px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.04)' }}>
-              {statCell('Pico geral', formatValue(overallMax), {}, { fontWeight: 700, color: peakColor })}
-              {statCell('Média geral', formatValue(overallAvg), { borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' })}
-              {statCell('Mín. geral', formatValue(overallMin), {}, { opacity: 0.8 })}
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  const containerGlowColor = badge.state === 'active'
-    ? (sections.find((s) => s.isActiveNow)?.color || badge.color)
+  const activeEpisode = resolvedEpisodes.find((ep) => ep.isActiveNow);
+  const peakEpisode = resolvedEpisodes.length > 0
+    ? resolvedEpisodes.reduce((prev, curr) => (curr.maxValue > prev.maxValue ? curr : prev), resolvedEpisodes[0])
+    : undefined;
+  const headerColor = badge.state === 'active'
+    ? resolveAlertHexColor(activeEpisode?.color || badge.color)
     : '#EAB839';
+  const containerGlowColor = headerColor;
+
+  const narrativeSummary = useMemo(
+    () =>
+      getAlertContextSummary(resolvedEpisodes, {
+        totalMs,
+        windowMs: Math.max(0, tEnd - tStart),
+        spansDays,
+        exactMatch,
+        formatValue,
+      }),
+    [resolvedEpisodes, totalMs, tStart, tEnd, spansDays, exactMatch, formatValue]
+  );
+
+  const iconBtnStyle: React.CSSProperties = {
+    width: 22,
+    height: 22,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 4,
+    border: '1px solid rgba(255,255,255,0.08)',
+    background: 'rgba(255,255,255,0.04)',
+    color: '#e2e8f0',
+    cursor: 'pointer',
+    opacity: 0.65,
+    padding: 0,
+    transition: 'opacity 0.15s ease, background-color 0.15s ease',
+    flexShrink: 0,
+  };
 
   return createPortal(
     <div
       ref={popupRef}
+      data-alert-popup="true"
       onClick={(e) => e.stopPropagation()}
       style={{
         position: 'fixed',
@@ -1140,45 +1986,257 @@ const AlertPopupPortal: React.FC<{
         opacity: pos.opacity,
         transition: 'opacity 0.15s ease',
         zIndex: 99999,
-        minWidth: 250,
+        minWidth: 280,
         maxWidth: 400,
+        maxHeight: 360,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
         backgroundColor: 'rgba(11, 16, 21, 0.97)',
         backdropFilter: 'blur(12px)',
         WebkitBackdropFilter: 'blur(12px)',
         borderRadius: '8px',
         border: `1px solid color-mix(in srgb, ${containerGlowColor} 30%, rgba(255,255,255,0.08))`,
         boxShadow: `0 12px 32px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.04), 0 0 20px color-mix(in srgb, ${containerGlowColor} 12%, transparent)`,
-        padding: '14px 14px 12px',
         color: '#e2e8f0',
         fontSize: '12px',
-        maxHeight: 320,
-        overflowY: 'auto',
         lineHeight: 1.5,
         pointerEvents: 'all',
       }}
     >
-      {/* Botão X — visível apenas quando pinado */}
-      {isPinned && (
-        <div
-          onClick={(e) => { e.stopPropagation(); onClose(); }}
-          title="Fechar (Esc)"
-          style={{
-            position: 'absolute', top: 8, right: 8,
-            cursor: 'pointer',
-            width: 20, height: 20,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            borderRadius: '50%',
-            backgroundColor: 'rgba(255,255,255,0.07)',
-            opacity: 0.7,
-            transition: 'opacity 0.15s, background-color 0.15s',
-          }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = '1'; (e.currentTarget as HTMLElement).style.backgroundColor = 'rgba(255,255,255,0.15)'; }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = '0.7'; (e.currentTarget as HTMLElement).style.backgroundColor = 'rgba(255,255,255,0.07)'; }}
-        >
-          <Icon name="times" size="sm" />
+      {/* Bloco 1: Header Fixo (Sticky no topo) */}
+      <div
+        style={{
+          flexShrink: 0,
+          padding: '11px 13px 10px',
+          borderBottom: '1px solid rgba(255,255,255,0.07)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 3,
+          background: 'rgba(255,255,255,0.015)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+          <div style={{ color: headerColor, fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            {badge.state === 'active' ? (
+              <Icon name="exclamation-triangle" size="sm" style={{ color: headerColor, flexShrink: 0 }} />
+            ) : (
+              <HistoryAlertIcon size={15} color={headerColor} />
+            )}
+            <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {badge.state === 'active' ? 'Threshold excedido' : 'Excursões na janela'}
+            </span>
+          </div>
+
+          {/* Botões de ação minimalistas (22x22px) */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+            <button
+              type="button"
+              title="Expandir na aba lateral"
+              style={iconBtnStyle}
+              onClick={(e) => {
+                e.stopPropagation();
+                onExpand();
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.opacity = '1';
+                e.currentTarget.style.background = 'rgba(255,255,255,0.12)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.opacity = '0.65';
+                e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
+              }}
+            >
+              <Icon name="columns" size="sm" />
+            </button>
+            <button
+              type="button"
+              title="Fechar (Esc)"
+              style={{ ...iconBtnStyle, fontSize: 15, fontWeight: 600, lineHeight: 1 }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onClose();
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.opacity = '1';
+                e.currentTarget.style.background = 'rgba(255,255,255,0.12)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.opacity = '0.65';
+                e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
+              }}
+            >
+              ×
+            </button>
+          </div>
         </div>
-      )}
-      {content}
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 10.5, opacity: 0.65 }}>
+          <span>
+            {formatShortTime(tStart, spansDays)} – {formatShortTime(tEnd, spansDays)}
+          </span>
+          <span>
+            {resolvedEpisodes.length} {resolvedEpisodes.length === 1 ? 'caso' : 'casos'} · <strong style={{ color: '#e2e8f0' }}>{humanDuration(totalMs, 'ms')}</strong>
+          </span>
+        </div>
+      </div>
+
+      {/* Bloco 2: Corpo rolável com Visão Geral do Período + Lista Unificada de Cards */}
+      <div
+        style={{
+          flex: 1,
+          overflowY: 'auto',
+          padding: '10px 13px 12px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+        }}
+      >
+        {/* Visão Geral do Período */}
+        {resolvedEpisodes.length > 0 && (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 7,
+              padding: '8px 10px',
+              borderRadius: 6,
+              background: 'rgba(255,255,255,0.03)',
+              border: '1px solid rgba(255,255,255,0.08)',
+              flexShrink: 0,
+            }}
+          >
+            {/* Narrativa dinâmica */}
+            <div style={{ fontSize: 11, lineHeight: 1.45, color: 'rgba(226, 232, 240, 0.92)' }}>
+              {narrativeSummary}
+            </div>
+
+            {/* Faixa Resumo: 3 células horizontais compactas */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1.35fr 1fr',
+                gap: 4,
+                padding: '5px 6px',
+                borderRadius: 4,
+                background: 'rgba(0,0,0,0.25)',
+              }}
+            >
+              {statCell('Total de Casos', `${resolvedEpisodes.length}`, {}, { fontWeight: 700, color: '#e2e8f0' })}
+              {statCell(
+                'Tempo em Alerta',
+                humanDuration(totalMs, 'ms'),
+                { borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' },
+                { fontWeight: 700, color: headerColor }
+              )}
+              {statCell(
+                'Pico Máximo',
+                peakEpisode ? formatValue(peakEpisode.maxValue) : '—',
+                {},
+                { fontWeight: 700, color: peakEpisode?.color || headerColor }
+              )}
+            </div>
+          </div>
+        )}
+
+        {resolvedEpisodes.map((ep, idx) => (
+          <div
+            key={`${ep.stepValue}-${ep.startTs}-${idx}`}
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+              padding: '8px 10px',
+              borderRadius: 6,
+              background: ep.isActiveNow ? parseColorToRgba(ep.color, 0.08) : 'rgba(255,255,255,0.025)',
+              border: `1px solid ${ep.isActiveNow ? parseColorToRgba(ep.color, 0.32) : 'rgba(255,255,255,0.06)'}`,
+              borderLeft: `3px solid ${ep.color}`,
+            }}
+          >
+            {/* Cabeçalho do Card */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+              <span style={{ fontWeight: 700, fontSize: 11, color: ep.color }}>
+                Threshold {exactMatch ? '=' : '≥'} {formatValue(ep.stepValue)}
+              </span>
+              {ep.isActiveNow ? (
+                <span
+                  style={{
+                    fontSize: 9,
+                    fontWeight: 800,
+                    color: ep.color,
+                    backgroundColor: parseColorToRgba(ep.color, 0.16),
+                    border: `1px solid ${parseColorToRgba(ep.color, 0.38)}`,
+                    padding: '1px 5px',
+                    borderRadius: 3,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.04em',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  ● EM ABERTO
+                </span>
+              ) : (
+                <span
+                  style={{
+                    fontSize: 9,
+                    fontWeight: 600,
+                    color: 'rgba(255,255,255,0.6)',
+                    backgroundColor: 'rgba(255,255,255,0.06)',
+                    padding: '1px 5px',
+                    borderRadius: 3,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.04em',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  NORMALIZADO
+                </span>
+              )}
+            </div>
+
+            {/* Tempos */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 11 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <span style={{ opacity: 0.7 }}>Início:</span>
+                <span style={{ fontWeight: 600 }}>{formatTimeDisplay(ep.startTs, spansDays)}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <span style={{ opacity: 0.7 }}>Normalização:</span>
+                {ep.isActiveNow ? (
+                  <span style={{ color: ep.color, fontWeight: 700 }}>Ainda em aberto</span>
+                ) : (
+                  <span style={{ fontWeight: 600 }}>{formatTimeDisplay(ep.endTs, spansDays)}</span>
+                )}
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <span style={{ opacity: 0.7 }}>Duração:</span>
+                <span style={{ fontWeight: 600 }}>{humanDuration(ep.durationMs, 'ms')}</span>
+              </div>
+            </div>
+
+            {/* Base do Card: 3 colunas compactas (Pico, Média, Mínimo) */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr 1fr',
+                gap: 4,
+                marginTop: 2,
+                padding: '4px 6px',
+                borderRadius: 4,
+                background: 'rgba(0,0,0,0.22)',
+              }}
+            >
+              {statCell('Pico', formatValue(ep.maxValue), {}, { fontWeight: 700, color: ep.color })}
+              {statCell(
+                'Média',
+                formatValue(ep.avgValue),
+                { borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' }
+              )}
+              {statCell('Mínimo', formatValue(ep.minValue), {}, { opacity: 0.85 })}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>,
     document.body
   );
@@ -1192,9 +2250,13 @@ const AlertBadgePopover: React.FC<{
   field: Field;
   exactMatch?: boolean;
   fieldConfig?: FieldConfigSource;
-}> = ({ badge, tStart, tEnd, field, exactMatch, fieldConfig }) => {
+  metricLabel?: string;
+  currentValueText?: string;
+  currentValueColor?: string;
+}> = ({ badge, tStart, tEnd, field, exactMatch, fieldConfig, metricLabel, currentValueText, currentValueColor }) => {
   const [isHovered, setIsHovered] = useState(false);
   const [isPinned, setIsPinned] = useState(false);
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [triggerRect, setTriggerRect] = useState<DOMRect | null>(null);
   const triggerRef = useRef<HTMLDivElement>(null);
 
@@ -1204,13 +2266,80 @@ const AlertBadgePopover: React.FC<{
   const handleClose = useCallback(() => {
     setIsPinned(false);
     setIsHovered(false);
+    setIsDrawerOpen(false);
+  }, []);
+
+  const handleExpandToDrawer = useCallback(() => {
+    setIsPinned(false);
+    setIsHovered(false);
+    setIsDrawerOpen(true);
+  }, []);
+
+  const handleCollapseFromDrawer = useCallback(() => {
+    if (triggerRef.current) {
+      setTriggerRect(triggerRef.current.getBoundingClientRect());
+    }
+    setIsDrawerOpen(false);
+    setIsPinned(true);
   }, []);
 
   if (badge.state === 'normal') return null;
 
-  const isOpen = isHovered || isPinned;
+  const isHistory = badge.state === 'historical';
+  const liveThresholds = getFieldThresholds(field, theme, fieldConfig);
+
+  // Determina o valor atual da métrica para garantir a cor do threshold ativo agora
+  let currentLastVal: number | null = null;
+  const rawVals = field.values as any[];
+  if (rawVals && rawVals.length) {
+    for (let i = rawVals.length - 1; i >= 0; i--) {
+      const v = rawVals[i];
+      if (v !== null && v !== undefined && !isNaN(Number(v))) {
+        currentLastVal = Number(v);
+        break;
+      }
+    }
+  }
+
+  const currentStep = currentLastVal !== null ? getActiveNativeThreshold(currentLastVal, liveThresholds, exactMatch) : null;
+  const currentThresholdColor = (currentStep && currentStep.value !== null && currentStep.color) ? currentStep.color : null;
+
+  const activeEpisodes = badge.episodes.filter((e) => e.isActiveNow);
+  const activeEpisode = activeEpisodes.sort((a, b) => b.stepValue - a.stepValue)[0];
+  const activeStep = activeEpisode
+    ? (liveThresholds?.steps.find((s) => s.value !== null && Math.abs(Number(s.value) - Number(activeEpisode.stepValue)) < 1e-6)
+       || getActiveNativeThreshold(activeEpisode.maxValue, liveThresholds, exactMatch))
+    : null;
+
+  const activeColor = currentThresholdColor || activeStep?.color || badge.color || '#E24D42';
+  const badgeColor = isHistory ? '#EAB839' : activeColor;
+  const bgAlpha = (isPinned || isDrawerOpen) ? (isHistory ? 0.18 : 0.28) : (isHistory ? 0.08 : 0.16);
+  const borderAlpha = (isPinned || isDrawerOpen) ? 0.75 : 0.55;
+
+  const customCfg = (field.config?.custom ?? {}) as CustomFieldConfig;
+  const resolvedLabel = metricLabel || customCfg.label || field.state?.displayName || field.name || 'Métrica';
+  const resolvedValueText = currentValueText || (currentLastVal !== null ? formatFieldValue(currentLastVal, field, theme).text : '—');
+
+  const inspectPayload: AlertInspectPayload = {
+    badge,
+    tStart,
+    tEnd,
+    field,
+    theme,
+    exactMatch,
+    fieldConfig,
+    metricLabel: resolvedLabel,
+    currentValueText: resolvedValueText,
+    currentValueColor: currentValueColor || badgeColor,
+  };
+
+  const isOpen = (isHovered || isPinned) && !isDrawerOpen;
 
   const handleMouseEnter = () => {
+    // Se já houver uma Aba Lateral montada no DOM, não abre pop-up flutuante por cima no hover
+    if (document.querySelector('[data-alert-left-drawer="true"]')) {
+      return;
+    }
     if (triggerRef.current) {
       setTriggerRect(triggerRef.current.getBoundingClientRect());
     }
@@ -1226,6 +2355,20 @@ const AlertBadgePopover: React.FC<{
     if (triggerRef.current) {
       setTriggerRect(triggerRef.current.getBoundingClientRect());
     }
+
+    // Dispara evento global antes de abrir o pop-up flutuante comum.
+    // Se uma Aba Lateral já estiver montada no DOM, ela intercepta (preventDefault) e atualiza seu estado.
+    const inspectEvent = new CustomEvent<AlertInspectPayload>('vale-stat-alert-inspect', {
+      detail: inspectPayload,
+      cancelable: true,
+    });
+    const wasNotIntercepted = window.dispatchEvent(inspectEvent);
+    if (!wasNotIntercepted) {
+      setIsPinned(false);
+      setIsHovered(false);
+      return;
+    }
+
     if (isPinned) {
       setIsPinned(false);
       setIsHovered(false);
@@ -1234,21 +2377,9 @@ const AlertBadgePopover: React.FC<{
     }
   };
 
-  const isHistory = badge.state === 'historical';
-  const liveThresholds = getFieldThresholds(field, theme, fieldConfig);
-  const activeEpisode = badge.episodes.find((e) => e.isActiveNow);
-  const activeStep = (badge.state === 'active' && activeEpisode)
-    ? (liveThresholds?.steps.find((s) => s.value !== null && Math.abs(Number(s.value) - Number(activeEpisode.stepValue)) < 1e-6)
-       || getActiveNativeThreshold(activeEpisode.maxValue, liveThresholds, exactMatch))
-    : null;
-  const resolvedColor = activeStep?.color || badge.color;
-  const badgeColor = isHistory ? '#EAB839' : resolvedColor;
-  const bgAlpha = isPinned ? (isHistory ? 0.18 : 0.28) : (isHistory ? 0.08 : 0.16);
-  const borderAlpha = isPinned ? 0.75 : 0.55;
-
   return (
     <div
-      style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, position: 'relative', zIndex: 10 }}
+      style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, position: 'relative', zIndex: isOpen ? 100005 : 10 }}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
@@ -1267,10 +2398,10 @@ const AlertBadgePopover: React.FC<{
           cursor: 'pointer',
           flexShrink: 0,
           transition: 'transform 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease',
-          boxShadow: isPinned
+          boxShadow: (isPinned || isDrawerOpen)
             ? `0 0 10px ${parseColorToRgba(badgeColor, 0.4)}`
             : `0 0 6px ${parseColorToRgba(badgeColor, 0.25)}`,
-          transform: isPinned ? 'scale(1.1)' : 'scale(1)',
+          transform: (isPinned || isDrawerOpen) ? 'scale(1.1)' : 'scale(1)',
         }}
         onClick={handleClick}
         title={
@@ -1282,7 +2413,7 @@ const AlertBadgePopover: React.FC<{
         {isHistory ? <HistoryAlertIcon size={12} color="#EAB839" /> : '!'}
       </div>
 
-      {/* Portal: renderizado fora do DOM do painel, direto no body */}
+      {/* Portal do Pop-up Flutuante: renderizado fora do DOM do painel, direto no body */}
       {isOpen && triggerRect && (
         <AlertPopupPortal
           badge={badge}
@@ -1291,11 +2422,21 @@ const AlertBadgePopover: React.FC<{
           triggerRect={triggerRect}
           isPinned={isPinned}
           onClose={handleClose}
+          onExpand={handleExpandToDrawer}
           formatValue={formatValue}
           exactMatch={exactMatch}
           field={field}
           theme={theme}
           fieldConfig={fieldConfig}
+        />
+      )}
+
+      {/* Portal da Aba Lateral (Left Side Drawer) */}
+      {isDrawerOpen && (
+        <AlertLeftDrawer
+          initialPayload={inspectPayload}
+          onCollapse={handleCollapseFromDrawer}
+          onClose={handleClose}
         />
       )}
     </div>
@@ -1323,8 +2464,33 @@ export const SimplePanel: React.FC<Props> = ({
   const [selectedSeriesIndex, setSelectedSeriesIndex] = useState<number | null>(null);
 
   useLayoutEffect(() => {
-    if (headerRef.current) { setHeaderH(headerRef.current.offsetHeight); }
-  }, [options.valueFontSize, options.showIcon, options.showLabel, options.showCurrentValue, width]);
+    const el = headerRef.current;
+    if (!el) {
+      return;
+    }
+    const updateHeight = () => {
+      if (headerRef.current) {
+        setHeaderH(headerRef.current.offsetHeight);
+      }
+    };
+    updateHeight();
+    const ro = new ResizeObserver(updateHeight);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [
+    options.valueFontSize,
+    options.showIcon,
+    options.showLabel,
+    options.showCurrentValue,
+    options.showSummary,
+    options.showPeriodMin,
+    options.showPeriodAverage,
+    options.showPeriodPeak,
+    options.showTimeInAlert,
+    width,
+    height,
+    data,
+  ]);
 
   const toggleSeries = useCallback((idx: number) => {
     setHiddenSeries((prev) => {
@@ -1357,7 +2523,10 @@ export const SimplePanel: React.FC<Props> = ({
         const values: number[] = Array.isArray(numericField.values)
           ? numericField.values : Array.from(numericField.values as any);
         const seriesIndex = infos.length;
-        const color = numericField.config?.color?.fixedColor || SERIES_PALETTE[seriesIndex % SERIES_PALETTE.length] || accent;
+        const rawFixedColor = numericField.config?.color?.fixedColor;
+        const color = rawFixedColor
+          ? resolveCanvasColor(rawFixedColor, theme)
+          : (SERIES_PALETTE[seriesIndex % SERIES_PALETTE.length] || accent);
         infos.push({
           name: getFieldDisplayName(numericField, s),
           field: numericField,
@@ -1424,7 +2593,7 @@ export const SimplePanel: React.FC<Props> = ({
   
   // Use the color of the first visible series, which includes native fixedColor overrides
   const firstSeriesColor = visibleSeriesInfos.length > 0 ? visibleSeriesInfos[0].color : accent;
-  const baseColor = customCfg.lineColor || firstSeriesColor;
+  const baseColor = resolveCanvasColor(customCfg.lineColor || firstSeriesColor, theme);
   
   const effectiveAreaOpacity = (customCfg.areaOpacity ?? 35) / 100;
 
@@ -1434,11 +2603,12 @@ export const SimplePanel: React.FC<Props> = ({
     const lines: Array<{ value: number; color: string }> = [];
     activeChartSeries.forEach((s) => {
       const nativeThr = getFieldThresholds(s.field, theme, fieldConfig);
-      if (nativeThr?.steps && nativeThr.steps.length > 1) {
+      if (nativeThr?.steps) {
         nativeThr.steps.forEach((st) => {
           if (st.value !== null && typeof st.value === 'number') {
-            if (!lines.some((l) => l.value === st.value && l.color === st.color)) {
-              lines.push({ value: st.value, color: st.color });
+            const lineCol = resolveCanvasColor(st.color, theme);
+            if (!lines.some((l) => l.value === st.value && l.color === lineCol)) {
+              lines.push({ value: st.value, color: lineCol });
             }
           }
         });
@@ -1457,14 +2627,14 @@ export const SimplePanel: React.FC<Props> = ({
       const v = s.values[i];
       if (v !== null && v !== undefined && !isNaN(v as number)) { last = v as number; break; }
     }
-    if (last === null) { return fallback; }
-    const isExact = (s.field.config.custom as CustomFieldConfig)?.exactThresholdMatch ?? options.exactThresholdMatch ?? false;
+    if (last === null) { return resolveCanvasColor(fallback, theme); }
+    const isExact = getFieldExactMatch(s.field, options.exactThresholdMatch, fieldConfig);
     const step = getActiveNativeThreshold(last, getFieldThresholds(s.field, theme, fieldConfig), isExact);
-    if (step && step.value !== null && step.color) { return step.color; }
+    if (step && step.value !== null && step.color) { return resolveCanvasColor(step.color, theme); }
     const mapped = getMappedColor(last, s.field, theme);
-    if (mapped) { return mapped; }
-    if (isExact) { return fallback; }
-    return step?.color ?? fallback;
+    if (mapped) { return resolveCanvasColor(mapped, theme); }
+    if (isExact) { return resolveCanvasColor(fallback, theme); }
+    return step?.color ? resolveCanvasColor(step.color, theme) : resolveCanvasColor(fallback, theme);
   }, [options.exactThresholdMatch, theme, fieldConfig]);
 
   let singleEffectiveColor = baseColor;
@@ -1504,18 +2674,21 @@ export const SimplePanel: React.FC<Props> = ({
     ? summaryValues.reduce((a, b) => a + b, 0) / summaryValues.length
     : null;
 
+  const disconnectThreshold = options.disconnectThreshold ?? 'auto';
+
   const alertDurations = useMemo(() => {
     if (!options.showTimeInAlert || periodSummaryInfos.length !== 1) return [];
-    const isExact = (periodSummaryInfos[0].field.config.custom as CustomFieldConfig)?.exactThresholdMatch ?? options.exactThresholdMatch ?? false;
+    const isExact = getFieldExactMatch(periodSummaryInfos[0].field, options.exactThresholdMatch, fieldConfig);
     return getAlertDurations(
       periodSummaryInfos[0].values,
       periodSummaryInfos[0].timeValues,
-      getFieldThresholds(periodSummaryInfos[0].field, theme),
+      getFieldThresholds(periodSummaryInfos[0].field, theme, fieldConfig),
       tStart,
       tEnd,
-      isExact
+      isExact,
+      disconnectThreshold
     );
-  }, [options.showTimeInAlert, options.exactThresholdMatch, periodSummaryInfos, tStart, tEnd, theme]);
+  }, [options.showTimeInAlert, options.exactThresholdMatch, periodSummaryInfos, tStart, tEnd, theme, fieldConfig, disconnectThreshold]);
 
   // ── Auto min/max com cálculo dinâmico sobre séries ativas/selecionadas ─────
   const autoMin = customCfg.axisConfig?.autoMin ?? true;
@@ -1524,7 +2697,8 @@ export const SimplePanel: React.FC<Props> = ({
   const { dataMinEff, dataMaxEff } = useMemo(() => {
     const allVals = activeChartSeries
       .flatMap((s) => s.values)
-      .filter((v) => v !== null && v !== undefined && !isNaN(v));
+      .filter((v) => v !== null && v !== undefined && v !== ('' as any) && !isNaN(Number(v)))
+      .map((v) => Number(v));
 
     const rawDataMin = allVals.length ? Math.min(...allVals) : 0;
     const rawDataMax = allVals.length ? Math.max(...allVals) : 1;
@@ -1532,67 +2706,66 @@ export const SimplePanel: React.FC<Props> = ({
     const fieldMin = activeChartSeries.map((s) => s.field.config?.min).find((v) => v !== undefined && v !== null);
     const fieldMax = activeChartSeries.map((s) => s.field.config?.max).find((v) => v !== undefined && v !== null);
 
-    // Verificar se há thresholds das séries ativas/selecionadas próximos da faixa de dados
-    // (ex: até 3x o valor máximo da série), garantindo ampliação de curvas pequenas
+    // Série binária/status (ex: ICMP Ping onde os pontos coletados são apenas 0 ou 1)
+    const isBinarySeries = allVals.length > 0 && allVals.every((v) => v === 0 || v === 1);
+
+    // Thresholds relevantes das séries ativas (passando fieldConfig para respeitar Overrides)
     const relevantThresholdVals: number[] = [];
-    activeChartSeries.forEach((s) => {
-      const thr = getFieldThresholds(s.field, theme);
-      if (thr?.steps) {
-        thr.steps.forEach((st) => {
-          if (st.value !== null && typeof st.value === 'number') {
-            if (rawDataMax > 0) {
-              if (st.value <= rawDataMax * 3 && st.value >= rawDataMin) {
+    if (!isBinarySeries) {
+      activeChartSeries.forEach((s) => {
+        const thr = getFieldThresholds(s.field, theme, fieldConfig);
+        if (thr?.steps) {
+          thr.steps.forEach((st) => {
+            if (st.value !== null && typeof st.value === 'number') {
+              if (rawDataMax > 0 && st.value <= rawDataMax * 3 && st.value >= rawDataMin) {
                 relevantThresholdVals.push(st.value);
-              }
-            } else if (rawDataMax === 0) {
-              if (st.value > 0 && st.value <= 10) {
-                relevantThresholdVals.push(st.value);
-              }
-            } else {
-              if (st.value <= Math.abs(rawDataMax) * 3) {
+              } else if (rawDataMax === 0 && st.value > 0 && st.value <= 10) {
                 relevantThresholdVals.push(st.value);
               }
             }
-          }
-        });
-      }
-    });
+          });
+        }
+      });
+    }
 
     const peakVal = relevantThresholdVals.length > 0
       ? Math.max(rawDataMax, ...relevantThresholdVals)
       : rawDataMax;
 
-    // Detecção de métricas booleanas / status / ICMP ping (valores entre 0 e 1)
-    const isBinaryOrStatus = rawDataMin >= 0 && rawDataMax <= 1;
-
     let min: number;
     if (!autoMin && customCfg.axisConfig?.min !== undefined) {
       min = customCfg.axisConfig.min;
+    } else if (isBinarySeries) {
+      // Prioridade máxima para série binária (ignora fieldMin legado como -1 salvo no JSON):
+      // Fixa 0 (Down) na base do card com respiro estético, independente do número de thresholds
+      min = -0.12;
     } else if (fieldMin !== undefined) {
       min = fieldMin;
-    } else if (isBinaryOrStatus) {
-      // Para métricas 0/1 (como ICMP Ping up/down), 0 fica rente à base com respiro de ~5%
-      min = -0.05;
+    } else if (rawDataMin === 0 && peakVal === 0) {
+      min = -0.12;
     } else {
       const delta = (peakVal - rawDataMin) || (peakVal !== 0 ? Math.abs(peakVal) * 0.12 : 1);
-      min = chartType === 'bar' ? Math.min(rawDataMin, 0) : rawDataMin - (delta * 0.08);
+      min = chartType === 'bar' ? Math.min(rawDataMin, 0) : rawDataMin - delta * 0.08;
     }
 
     let max: number;
     if (!autoMax && customCfg.axisConfig?.max !== undefined) {
       max = customCfg.axisConfig.max;
+    } else if (isBinarySeries) {
+      // Prioridade máxima para série binária:
+      // Fixa 1 (Up) no topo do card com respiro estético, mesmo quando todos os pontos atuais são 0 (Down)
+      max = 1.15;
     } else if (fieldMax !== undefined) {
       max = fieldMax;
-    } else if (isBinaryOrStatus) {
-      // 1 fica próximo do topo com respiro de ~5%
-      max = peakVal > 1 ? peakVal * 1.05 : 1.05;
+    } else if (rawDataMin === 0 && peakVal === 0) {
+      max = 1.15;
     } else {
       const delta = (peakVal - rawDataMin) || (peakVal !== 0 ? Math.abs(peakVal) * 0.12 : 1);
-      max = chartType === 'bar' ? Math.max(peakVal, 0) + (delta * 0.12) : peakVal + (delta * 0.12);
+      max = chartType === 'bar' ? Math.max(peakVal, 0) + delta * 0.12 : peakVal + delta * 0.12;
     }
 
     return { dataMinEff: min, dataMaxEff: max > min ? max : min + 1 };
-  }, [activeChartSeries, autoMin, autoMax, chartType, customCfg.axisConfig, theme]);
+  }, [activeChartSeries, autoMin, autoMax, chartType, customCfg.axisConfig, theme, fieldConfig]);
 
   if (data.series.length === 0) {
     return <PanelDataErrorView fieldConfig={fieldConfig} panelId={id} data={data} needsNumberField />;
@@ -1666,7 +2839,7 @@ export const SimplePanel: React.FC<Props> = ({
   let singleExactMatch = false;
   if (allSeriesInfos.length <= 1 && allSeriesInfos[0]) {
     const singleSeries = allSeriesInfos[0];
-    singleExactMatch = (singleSeries.field.config.custom as CustomFieldConfig)?.exactThresholdMatch ?? options.exactThresholdMatch ?? false;
+    singleExactMatch = getFieldExactMatch(singleSeries.field, options.exactThresholdMatch, fieldConfig);
     let singleLast: number | null = null;
     for (let i = singleSeries.values.length - 1; i >= 0; i--) {
       const v = singleSeries.values[i];
@@ -1707,18 +2880,18 @@ export const SimplePanel: React.FC<Props> = ({
   // Métrica (Valor): segue o toggle 'useThreshold' (ou legados valueFollowsThreshold / colorValueByThreshold)
   const isSingleValueThreshold = options.useThreshold ?? options.valueFollowsThreshold ?? colorValueByThreshold ?? false;
   let valueColor = '#FFFFFF';
-  if (isSingleValueThreshold) {
+  if (singleExactMatch && activeSingleThresholdColor === null) {
+    valueColor = displayValueColor || singleStepColor || '#FFFFFF';
+  } else if (isSingleValueThreshold) {
     if (activeSingleThresholdColor) {
       valueColor = activeSingleThresholdColor;
     } else if (displayValueColor) {
       valueColor = displayValueColor;
-    } else if (singleExactMatch) {
-      valueColor = '#FFFFFF';
     } else {
       valueColor = singleStepColor ?? '#FFFFFF';
     }
   } else {
-    valueColor = displayValueColor || '#FFFFFF';
+    valueColor = activeSingleThresholdColor || displayValueColor || '#FFFFFF';
   }
   // O resumo (min/méd/pico) é avaliado individualmente: cada estatística só assume
   // a cor do threshold se ELA PRÓPRIA violar um step; caso contrário mantém a cor natural.
@@ -1813,13 +2986,16 @@ export const SimplePanel: React.FC<Props> = ({
                 </span>
                 {singleS && singleLastVal !== null && (
                   <AlertBadgePopover
-                    badge={getBadgeState(singleLastVal, singleS.values, singleS.timeValues, singleThr, tStart, tEnd, theme, activeSingleThresholdColor, singleExactMatch)}
+                    badge={getBadgeState(singleLastVal, singleS.values, singleS.timeValues, singleThr, tStart, tEnd, theme, activeSingleThresholdColor, singleExactMatch, disconnectThreshold)}
                     tStart={tStart}
                     tEnd={tEnd}
                     styles={styles}
                     field={singleS.field}
                     exactMatch={singleExactMatch}
                     fieldConfig={fieldConfig}
+                    metricLabel={singleLabel}
+                    currentValueText={displayValue ?? '—'}
+                    currentValueColor={valueColor}
                   />
                 )}
               </div>
@@ -1863,7 +3039,7 @@ export const SimplePanel: React.FC<Props> = ({
                 break;
               }
             }
-            const sExactMatch = custom.exactThresholdMatch ?? options.exactThresholdMatch ?? false;
+            const sExactMatch = getFieldExactMatch(s.field, options.exactThresholdMatch, fieldConfig);
             const formattedValObj = lastVal !== null ? formatFieldValue(lastVal, s.field, theme) : null;
             const formattedVal = formattedValObj ? formattedValObj.text : '—';
             const mappedValColor = getMappedColor(lastVal, s.field, theme);
@@ -1892,18 +3068,18 @@ export const SimplePanel: React.FC<Props> = ({
               : (colorLabelByThreshold && mappedValColor ? mappedValColor : multiLabelBase);
             const isMultiValueThreshold = options.useThreshold ?? options.valueFollowsThreshold ?? colorValueByThreshold ?? false;
             let multiValueColor = '#FFFFFF';
-            if (isMultiValueThreshold) {
+            if (sExactMatch && activeViolationColor === null) {
+              multiValueColor = mappedValColor || step?.color || '#FFFFFF';
+            } else if (isMultiValueThreshold) {
               if (activeViolationColor) {
                 multiValueColor = activeViolationColor;
               } else if (mappedValColor) {
                 multiValueColor = mappedValColor;
-              } else if (sExactMatch) {
-                multiValueColor = '#FFFFFF';
               } else {
                 multiValueColor = step?.color ?? '#FFFFFF';
               }
             } else {
-              multiValueColor = mappedValColor || '#FFFFFF';
+              multiValueColor = activeViolationColor || mappedValColor || '#FFFFFF';
             }
             // Cor natural do resumo (separadores e estatísticas sem violação)
             const multiSummaryColor = '#FFFFFF';
@@ -1925,7 +3101,7 @@ export const SimplePanel: React.FC<Props> = ({
             const maxFormatted = cardMax !== null ? formatFieldValue(cardMax, s.field, theme).text : '';
 
             const cardAlertDurations = (isSummaryVisible && options.showTimeInAlert)
-              ? getAlertDurations(s.values, s.timeValues, getFieldThresholds(s.field, theme, fieldConfig), tStart, tEnd, sExactMatch)
+              ? getAlertDurations(s.values, s.timeValues, getFieldThresholds(s.field, theme, fieldConfig), tStart, tEnd, sExactMatch, disconnectThreshold)
               : [];
 
             // Montar nós de resumo compactos com badge condicional
@@ -2025,13 +3201,16 @@ export const SimplePanel: React.FC<Props> = ({
                     </div>
                     {/* Badge de alerta ao lado do valor */}
                     <AlertBadgePopover
-                       badge={getBadgeState(lastVal, s.values, s.timeValues, thr, tStart, tEnd, theme, activeViolationColor, sExactMatch)}
+                       badge={getBadgeState(lastVal, s.values, s.timeValues, thr, tStart, tEnd, theme, activeViolationColor, sExactMatch, disconnectThreshold)}
                        tStart={tStart}
                        tEnd={tEnd}
                        styles={styles}
                        field={s.field}
                        exactMatch={sExactMatch}
                        fieldConfig={fieldConfig}
+                       metricLabel={serieLabel}
+                       currentValueText={formattedVal}
+                       currentValueColor={multiValueColor}
                     />
                   </div>
                 )}
@@ -2105,6 +3284,7 @@ export const SimplePanel: React.FC<Props> = ({
               axisLineColor={axisLineColor}
               gridLineColor={gridLineColor}
               selectedSeriesIndex={selectedSeriesIndex}
+              disconnectThreshold={disconnectThreshold}
               onHover={(ts, points, px, py) => {
                 if (pinnedHover) return; // Não atualiza hover se há um pinado
                 if (!ts || !points) {

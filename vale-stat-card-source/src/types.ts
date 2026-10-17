@@ -37,6 +37,8 @@ export type ColumnDisplayType = 'text' | 'badge' | 'progressBar' | 'colorByThres
 export type LineGradient = 'none' | 'opacity' | 'fade';
 /** Cor base do rótulo: 'neutral' = cinza (igual Mín/Méd/Máx), 'accent' = cor do tema/série */
 export type LabelColorMode = 'neutral' | 'accent';
+/** Limite explícito de tempo sem dados antes de interromper a linha do gráfico e episódios */
+export type DisconnectThresholdMode = 'auto' | '1m' | '2m' | '5m' | '15m' | '30m' | '1h' | 'never';
 
 export interface AxisConfig {
   autoMin: boolean;
@@ -218,6 +220,7 @@ export interface SimpleOptions {
   thresholdMode: ThresholdMode;
   exactThresholdMatch?: boolean;
   labelColorMode?: LabelColorMode;
+  disconnectThreshold?: DisconnectThresholdMode;
   // Toggles de visibilidade do cabeçalho
   showIcon: boolean;
   showLabel: boolean;

@@ -37,7 +37,7 @@ scp -r dist/* "${VmUser}@${VmHost}:${RemoteTmp}/"
 
 Write-Host "==> Instalando no diretório de plugins do Grafana e reiniciando o serviço..." -ForegroundColor Cyan
 # -t força alocação de terminal, necessário para o sudo pedir senha se for o caso
-ssh -t "$VmUser@$VmHost" "sudo rm -rf $RemoteDest && sudo mv $RemoteTmp $RemoteDest && sudo chown -R grafana:grafana $RemoteDest && sudo systemctl restart grafana-server"
+ssh -t "$VmUser@$VmHost" "sudo rm -rf /var/lib/grafana/plugins/vale-dynamic-cards-next $RemoteDest && sudo mv $RemoteTmp $RemoteDest && sudo chown -R grafana:grafana $RemoteDest && sudo systemctl restart grafana-server"
 
 Write-Host ""
 Write-Host "==> Deploy concluído!" -ForegroundColor Green

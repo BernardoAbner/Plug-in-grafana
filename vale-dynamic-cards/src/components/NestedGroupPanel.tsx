@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import { PanelProps, formattedValueToString, getDisplayProcessor } from '@grafana/data';
 import { SimpleOptions, NestedRowMetricConfig } from '../types';
 import { listMetrics, AvailableMetric, getLastNonNullValue } from '../metrics';
-import { css, cx } from '@emotion/css';
+import { css } from '@emotion/css';
 import { useStyles2, Icon, useTheme2 } from '@grafana/ui';
 import { THEME_COLORS } from './SimplePanel';
 
@@ -11,7 +11,7 @@ interface Props extends PanelProps<SimpleOptions> {}
 const getStyles = (theme: ReturnType<typeof useTheme2>, accent: string, options: SimpleOptions) => {
   const baseBg = theme.isDark ? '#0c141d' : theme.colors.background.primary;
   const cardGradient = theme.isDark
-    ? 'linear-gradient(180deg, #0e1922 0%, #0c141d 50%, #0b111a 85%, #111217 100%)'
+    ? 'linear-gradient(180deg, #0d1720 0%, #0c141d 55%, #0b121a 100%)'
     : 'none';
   const borderColor = theme.isDark ? 'rgba(255, 255, 255, 0.06)' : theme.colors.border.weak;
   const labelColor = theme.colors.text.secondary;

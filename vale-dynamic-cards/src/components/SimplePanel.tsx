@@ -180,11 +180,26 @@ function getDynamicSubMetricStyle(text: string, sizeOption: string | undefined):
   return { fontSize: '16px', lineHeight: 1.2, fontWeight: 'bold', wordBreak: 'break-word' };
 }
 
+/**
+ * Tipografia adaptativa para rótulos dos sub-cards e métricas da barra de status.
+ * Reduz a fonte conforme o comprimento do texto para evitar corte precoce.
+ */
+function getAdaptiveLabelStyle(label: string, baseFontSize = 10.5): React.CSSProperties {
+  const len = (label || '').length;
+  if (len <= 15) {
+    return { fontSize: `${baseFontSize}px` };
+  }
+  if (len <= 23) {
+    return { fontSize: '9.5px', letterSpacing: '-0.01em' };
+  }
+  return { fontSize: '8.8px', letterSpacing: '-0.015em' };
+}
+
 // ─── Estilos ───────────────────────────────────────────────────────────────
 const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions) => {
   const baseBg = theme.isDark ? '#0c141d' : theme.colors.background.primary;
   const cardGradient = theme.isDark
-    ? 'linear-gradient(180deg, #0e1922 0%, #0c141d 50%, #0b111a 85%, #111217 100%)'
+    ? 'linear-gradient(180deg, #0d1720 0%, #0c141d 55%, #0b121a 100%)'
     : 'none';
   const borderColor = theme.isDark ? 'rgba(255, 255, 255, 0.06)' : theme.colors.border.weak;
   const labelColor = theme.isDark ? 'rgba(255,255,255,0.55)' : theme.colors.text.secondary;
@@ -406,6 +421,12 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       font-weight: ${theme.typography.fontWeightMedium};
       letter-spacing: 0.04em;
       text-transform: uppercase;
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      box-sizing: border-box;
     `,
     metricCompactValue: css`
       color: ${valueTextColor};
@@ -555,14 +576,17 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       flex-direction: column;
       justify-content: center;
       background-color: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.04);
       border-radius: 6px;
       padding: ${theme.spacing(0.75)};
       overflow: hidden;
+      min-width: 0;
+      max-width: 100%;
+      box-sizing: border-box;
       z-index: 3;
       height: 52px;
       max-height: 52px;
       min-height: 52px;
-      box-sizing: border-box;
     `,
     filhoCardSingle: css`
       display: flex;
@@ -586,11 +610,15 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
     `,
     filhoLabel: css`
       color: ${labelColor};
-      font-size: 10px;
+      font-size: 10.5px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
       margin-bottom: 2px;
+      min-width: 0;
+      max-width: 100%;
+      box-sizing: border-box;
+      display: block;
     `,
     filhoValueDestaque: css`
       color: ${valueTextColor};
@@ -624,12 +652,15 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
     horizontalChild: css`
       flex: 1 1 auto;
       min-width: 0;
+      max-width: 100%;
       container-type: inline-size;
       overflow: hidden;
       display: flex;
       flex-direction: column;
       justify-content: center;
+      align-items: flex-start;
       background-color: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.04);
       border-radius: 6px;
       padding: ${theme.spacing(1)};
       z-index: 3;
@@ -639,17 +670,23 @@ const getStyles = (theme: GrafanaTheme2, accent: string, options: SimpleOptions)
       box-sizing: border-box;
     `,
     horizontalLabel: css`
-      font-size: 10px;
+      font-size: 10.5px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
       margin-bottom: 2px;
-      text-align: center;
-      color: ${theme.colors.text.secondary};
+      text-align: left;
+      color: ${labelColor};
+      min-width: 0;
+      max-width: 100%;
+      box-sizing: border-box;
+      display: block;
+      width: 100%;
     `,
     horizontalValue: css`
       font-weight: bold;
-      text-align: center;
+      text-align: left;
+      width: 100%;
     `,
   };
 };
@@ -751,6 +788,7 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
       const noDataColor = theme.isDark ? '#8e96a5' : '#6e7687';
       let statusColor = accent;
       let statusText = 'SEM DADOS';
+      let hasViolation = false;
       
       if (metric?.field) {
         const raw = getLastNonNullValue(metric.field);
@@ -764,6 +802,7 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
           const exceededColor = getExceededColor(metric.field, display.color, theme);
           statusColor = exceededColor || accent;
           statusText = display.text || (healthy ? 'NORMAL' : 'ALERTA');
+          hasViolation = exceededColor !== undefined || healthy === false;
         }
       } else {
         statusColor = noDataColor;
@@ -805,6 +844,7 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
         iconStyle,
         statusColor,
         statusText,
+        hasViolation,
         layoutType,
         children,
       });
@@ -824,10 +864,11 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
       >
         <div className={isSingleCardPanel ? styles.gridPaisSingle : styles.gridPais}>
           {macroCardsConfig.map((card) => {
-            const applyParentBg = parentThresholdTarget === 'background' || parentThresholdTarget === 'both';
+            const hasParentViolation = card.hasViolation;
+            const applyParentBg = (parentThresholdTarget === 'background' || parentThresholdTarget === 'both') && hasParentViolation;
             const applyParentIcon = parentThresholdTarget === 'icon' || parentThresholdTarget === 'both';
             
-            const parentBgColor = applyParentBg ? card.statusColor : accent;
+            const parentBgColor = card.statusColor;
             const parentIconColor = applyParentIcon ? card.statusColor : accent;
             
             const configuredChildren = card.children.filter((c) => c.hasConfig).length;
@@ -881,26 +922,39 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
                         return <div key={child.id} className={styles.horizontalChild} />;
                       }
 
+                      const hasChildViolation = Boolean(child.thresholdColor);
                       const applyChildBg = childThresholdTarget === 'background' || childThresholdTarget === 'both';
                       const applyChildValue = childThresholdTarget === 'value' || childThresholdTarget === 'both';
 
-                      const childBgColor = applyChildBg ? (child.thresholdColor || accent) : accent;
                       const baseValueColor = theme.isDark ? '#f4f6fb' : theme.colors.text.primary;
                       const childValueColor = applyChildValue ? (child.thresholdColor || baseValueColor) : baseValueColor;
                       
                       const typoStyle = getDynamicSubMetricStyle(child.displayValue, options.subMetricFontSize);
 
+                      const childBgStyle: React.CSSProperties = (applyChildBg && hasChildViolation)
+                        ? {
+                            backgroundColor: `color-mix(in srgb, ${child.thresholdColor} 8%, transparent)`,
+                            boxShadow: `inset 0 0 10px color-mix(in srgb, ${child.thresholdColor} 15%, transparent)`,
+                            border: `1px solid color-mix(in srgb, ${child.thresholdColor} 20%, transparent)`,
+                          }
+                        : {
+                            backgroundColor: 'rgba(255, 255, 255, 0.03)',
+                            border: '1px solid rgba(255, 255, 255, 0.04)',
+                          };
+
                       return (
                         <div 
                           key={child.id} 
                           className={styles.horizontalChild}
-                          style={applyChildBg ? {
-                            backgroundColor: `color-mix(in srgb, ${childBgColor} 8%, transparent)`,
-                            boxShadow: `inset 0 0 10px color-mix(in srgb, ${childBgColor} 15%, transparent)`,
-                            border: `1px solid color-mix(in srgb, ${childBgColor} 20%, transparent)`,
-                          } : {}}
+                          style={childBgStyle}
                         >
-                          <div className={styles.horizontalLabel} title={child.label}>{child.label}</div>
+                          <div 
+                            className={styles.horizontalLabel} 
+                            style={getAdaptiveLabelStyle(child.label)}
+                            title={child.label}
+                          >
+                            {child.label}
+                          </div>
                           <div 
                             className={styles.horizontalValue}
                             style={{ color: childValueColor, ...typoStyle }}
@@ -914,26 +968,36 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
                 ) : isSingleChild && !hasHeader ? (
                   <div className={styles.filhosGridSingle}>
                     {card.children.map((child) => {
+                      const hasChildViolation = Boolean(child.thresholdColor);
                       const applyChildBg = childThresholdTarget === 'background' || childThresholdTarget === 'both';
                       const applyChildValue = childThresholdTarget === 'value' || childThresholdTarget === 'both';
 
-                      const childBgColor = applyChildBg ? (child.thresholdColor || accent) : accent;
                       const baseValueColor = theme.isDark ? '#f4f6fb' : theme.colors.text.primary;
                       const childValueColor = applyChildValue ? (child.thresholdColor || baseValueColor) : baseValueColor;
+
+                      const childBgStyle: React.CSSProperties = (applyChildBg && hasChildViolation)
+                        ? {
+                            backgroundColor: `color-mix(in srgb, ${child.thresholdColor} 8%, transparent)`,
+                            boxShadow: `inset 0 0 10px color-mix(in srgb, ${child.thresholdColor} 15%, transparent)`,
+                            border: `1px solid color-mix(in srgb, ${child.thresholdColor} 20%, transparent)`,
+                            borderRadius: '6px',
+                            padding: '6px 10px',
+                          }
+                        : {};
 
                       return (
                         <div 
                           key={child.id} 
                           className={styles.filhoCardSingle}
-                          style={applyChildBg ? {
-                            backgroundColor: `color-mix(in srgb, ${childBgColor} 8%, transparent)`,
-                            boxShadow: `inset 0 0 10px color-mix(in srgb, ${childBgColor} 15%, transparent)`,
-                            border: `1px solid color-mix(in srgb, ${childBgColor} 20%, transparent)`,
-                            borderRadius: '6px',
-                            padding: '6px 10px',
-                          } : {}}
+                          style={childBgStyle}
                         >
-                          <div className={cx(styles.filhoLabel, styles.textEllipsis)} title={child.label}>{child.label}</div>
+                          <div 
+                            className={cx(styles.filhoLabel, styles.textEllipsis)} 
+                            style={getAdaptiveLabelStyle(child.label)}
+                            title={child.label}
+                          >
+                            {child.label}
+                          </div>
                           <div 
                             className={styles.filhoValueSingle}
                             style={{ color: childValueColor }}
@@ -955,26 +1019,39 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
                         return <div key={child.id} className={cardStyle} />;
                       }
 
+                      const hasChildViolation = Boolean(child.thresholdColor);
                       const applyChildBg = childThresholdTarget === 'background' || childThresholdTarget === 'both';
                       const applyChildValue = childThresholdTarget === 'value' || childThresholdTarget === 'both';
 
-                      const childBgColor = applyChildBg ? (child.thresholdColor || accent) : accent;
                       const baseValueColor = theme.isDark ? '#f4f6fb' : theme.colors.text.primary;
                       const childValueColor = applyChildValue ? (child.thresholdColor || baseValueColor) : baseValueColor;
                       
                       const typoStyle = getDynamicSubMetricStyle(child.displayValue, options.subMetricFontSize);
 
+                      const childBgStyle: React.CSSProperties = (applyChildBg && hasChildViolation)
+                        ? {
+                            backgroundColor: `color-mix(in srgb, ${child.thresholdColor} 8%, transparent)`,
+                            boxShadow: `inset 0 0 10px color-mix(in srgb, ${child.thresholdColor} 15%, transparent)`,
+                            border: `1px solid color-mix(in srgb, ${child.thresholdColor} 20%, transparent)`,
+                          }
+                        : {
+                            backgroundColor: 'rgba(255, 255, 255, 0.03)',
+                            border: '1px solid rgba(255, 255, 255, 0.04)',
+                          };
+
                       return (
                         <div 
                           key={child.id} 
                           className={cardStyle}
-                          style={applyChildBg ? {
-                            backgroundColor: `color-mix(in srgb, ${childBgColor} 8%, transparent)`,
-                            boxShadow: `inset 0 0 10px color-mix(in srgb, ${childBgColor} 15%, transparent)`,
-                            border: `1px solid color-mix(in srgb, ${childBgColor} 20%, transparent)`,
-                          } : {}}
+                          style={childBgStyle}
                         >
-                          <div className={cx(styles.filhoLabel, styles.textEllipsis)} title={child.label}>{child.label}</div>
+                          <div 
+                            className={cx(styles.filhoLabel, styles.textEllipsis)} 
+                            style={getAdaptiveLabelStyle(child.label)}
+                            title={child.label}
+                          >
+                            {child.label}
+                          </div>
                           <div 
                             className={isDestaque ? styles.filhoValueDestaque : styles.filhoValueNormal}
                             style={isDestaque ? { color: childValueColor } : { color: childValueColor, ...typoStyle }}
@@ -1134,13 +1211,17 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
             const iconColor = iconFollowThreshold && exceededColor ? resolveColor(theme, exceededColor, accent) : accent;
             return (
               <div className={styles.metricCompact} key={config.id}>
-                <span className={styles.metricCompactLabel} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span 
+                  className={styles.metricCompactLabel} 
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, ...getAdaptiveLabelStyle(label, 10) }}
+                  title={label}
+                >
                   {shouldShowIcon !== false && (
                     <span style={getIconContainerStyle(iconStyle, iconColor, 22, 6)}>
                       <Icon name={iconName} size="xs" />
                     </span>
                   )}
-                  {label}
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
                 </span>
                 <span className={styles.metricCompactValue} style={{ color: useThreshold && exceededColor ? exceededColor : undefined }}>
                   {display.text}
