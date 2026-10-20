@@ -1759,7 +1759,12 @@ const AlertPopupPortal: React.FC<{
   fieldConfig?: FieldConfigSource;
 }> = ({ badge, tStart, tEnd, triggerRect, onClose, onExpand, formatValue, exactMatch = false, field, theme, fieldConfig }) => {
   const popupRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState({ top: 0, left: 0, opacity: 0 });
+  const [pos, setPos] = useState<{ top: number; left: number; opacity: number; maxHeight: number }>({
+    top: 0,
+    left: 0,
+    opacity: 0,
+    maxHeight: 360,
+  });
 
   // Calcula o tempo total em alerta unindo intervalos sobrepostos (evita somar duplicado quando >=40% e >=50% ocorrem juntos)
   const totalMs = useMemo(() => {
@@ -1795,21 +1800,34 @@ const AlertPopupPortal: React.FC<{
     };
   }, []);
 
-  // Calcular posição real na tela após montar, garantindo que o popup NUNCA fique sobre o botão trigger
+  // Calcular posição real na tela após montar, priorizando SEMPRE abrir para cima
+  // para não tampar o gráfico abaixo do cabeçalho do card e nunca cobrir o botão trigger
   useLayoutEffect(() => {
     if (!popupRef.current) { return; }
     const popup = popupRef.current;
-    const popupW = popup.offsetWidth;
-    const popupH = popup.offsetHeight;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const MARGIN = 8;
     const GAP = 8;
 
+    // Espaço livre exatamente acima do botão trigger até o topo da viewport
+    const availableAbove = triggerRect.top - GAP - MARGIN;
+    // Se houver pelo menos 150px acima do botão, limita a altura máxima do popup para caber
+    // 100% acima do botão (o corpo interno já possui scroll próprio). Caso o card esteja no
+    // topo absoluto da tela, usa altura mais compacta para encaixar ao lado/topo sem cobrir o gráfico.
+    const targetMaxH = availableAbove >= 150
+      ? Math.min(360, Math.floor(availableAbove))
+      : 250;
+
+    // Aplica o maxHeight antes de medir offsetHeight para obter a altura real ajustada
+    popup.style.maxHeight = `${targetMaxH}px`;
+    const popupW = popup.offsetWidth;
+    const popupH = popup.offsetHeight;
+
     const clampHoriz = (l: number) => Math.max(MARGIN, Math.min(l, Math.max(MARGIN, vw - popupW - MARGIN)));
     const clampVert = (t: number) => Math.max(MARGIN, Math.min(t, Math.max(MARGIN, vh - popupH - MARGIN)));
 
-    // Preferência natural: ACIMA do botão e alinhado à sua direita
+    // Preferência estrita: ACIMA do botão
     const prefAboveTop = triggerRect.top - popupH - GAP;
     const prefBelowTop = triggerRect.bottom + GAP;
     const prefRightLeft = triggerRect.right - popupW;
@@ -1837,70 +1855,82 @@ const AlertPopupPortal: React.FC<{
       return area;
     };
 
-    // Gera candidatos que procuram ficar fora do botão trigger
+    // Gera candidatos priorizando posições ACIMA ou ancoradas no topo ao lado do botão
     const rawCandidates: Array<{ top: number; left: number }> = [];
 
-    // 1. Acima do botão (se couber sem invadir o botão)
+    // 1. Acima do botão (prioridade máxima — nunca cobre o gráfico abaixo do header)
     if (prefAboveTop >= MARGIN) {
       rawCandidates.push({ top: prefAboveTop, left: clampHoriz(prefRightLeft) });
       rawCandidates.push({ top: prefAboveTop, left: clampHoriz(triggerRect.left) });
+      rawCandidates.push({ top: prefAboveTop, left: clampHoriz(triggerRect.left + triggerRect.width / 2 - popupW / 2) });
     }
 
-    // 2. Abaixo do botão (se couber sem invadir o botão)
+    // 2. À esquerda ou direita do botão, ancorado o mais para cima possível (top = MARGIN ou subindo a partir da base do botão)
+    const sideTopUpward = clampVert(Math.min(MARGIN, triggerRect.bottom - popupH));
+    const sideTopAlignedBottom = clampVert(triggerRect.bottom - popupH);
+    if (triggerRect.left - popupW - GAP >= MARGIN) {
+      rawCandidates.push({ top: sideTopAlignedBottom, left: triggerRect.left - popupW - GAP });
+      rawCandidates.push({ top: sideTopUpward, left: triggerRect.left - popupW - GAP });
+      rawCandidates.push({ top: clampVert(triggerRect.top + 11 - popupH / 2), left: triggerRect.left - popupW - GAP });
+    }
+    if (triggerRect.right + GAP + popupW <= vw - MARGIN) {
+      rawCandidates.push({ top: sideTopAlignedBottom, left: triggerRect.right + GAP });
+      rawCandidates.push({ top: sideTopUpward, left: triggerRect.right + GAP });
+      rawCandidates.push({ top: clampVert(triggerRect.top + 11 - popupH / 2), left: triggerRect.right + GAP });
+    }
+
+    // 3. Abaixo do botão (apenas último recurso caso nenhuma posição superior/lateral esteja livre)
     if (prefBelowTop + popupH <= vh - MARGIN) {
       rawCandidates.push({ top: prefBelowTop, left: clampHoriz(prefRightLeft) });
       rawCandidates.push({ top: prefBelowTop, left: clampHoriz(triggerRect.left) });
     }
 
-    // 3. À esquerda do botão (horizontalmente livre do trigger)
-    if (triggerRect.left - popupW - GAP >= MARGIN) {
-      rawCandidates.push({ top: clampVert(triggerRect.top), left: triggerRect.left - popupW - GAP });
-      rawCandidates.push({ top: clampVert(triggerRect.top + 11 - popupH / 2), left: triggerRect.left - popupW - GAP });
-    }
-
-    // 4. À direita do botão (horizontalmente livre do trigger)
-    if (triggerRect.right + GAP + popupW <= vw - MARGIN) {
-      rawCandidates.push({ top: clampVert(triggerRect.top), left: triggerRect.right + GAP });
-      rawCandidates.push({ top: clampVert(triggerRect.top + 11 - popupH / 2), left: triggerRect.right + GAP });
-    }
-
-    // 5. Fallbacks padrão clampados
+    // 4. Fallbacks padrão clampados
     rawCandidates.push(
       { top: clampVert(prefAboveTop), left: clampHoriz(prefRightLeft) },
-      { top: clampVert(prefBelowTop), left: clampHoriz(prefRightLeft) },
-      { top: clampVert(triggerRect.top), left: clampHoriz(triggerRect.left - popupW - GAP) },
-      { top: clampVert(triggerRect.top), left: clampHoriz(triggerRect.right + GAP) }
+      { top: clampVert(sideTopAlignedBottom), left: clampHoriz(triggerRect.left - popupW - GAP) },
+      { top: clampVert(sideTopAlignedBottom), left: clampHoriz(triggerRect.right + GAP) },
+      { top: clampVert(prefBelowTop), left: clampHoriz(prefRightLeft) }
     );
 
-    // Candidatos adjacentes a popups já abertos
+    // Candidatos adjacentes a popups já abertos (priorizando acima/lados antes de abaixo)
     for (const r of priorPopups) {
       rawCandidates.push(
+        { top: clampVert(r.top - popupH - GAP), left: clampHoriz(r.left) },
         { top: clampVert(r.top), left: clampHoriz(r.left - popupW - GAP) },
         { top: clampVert(r.top), left: clampHoriz(r.right + GAP) },
-        { top: clampVert(r.bottom + GAP), left: clampHoriz(r.left) },
-        { top: clampVert(r.top - popupH - GAP), left: clampHoriz(r.left) }
+        { top: clampVert(r.bottom + GAP), left: clampHoriz(r.left) }
       );
     }
 
     let best = rawCandidates[0];
     let bestScore = Infinity;
+    const idealTop = Math.max(MARGIN, prefAboveTop);
 
     for (const cand of rawCandidates) {
       const c = { top: clampVert(cand.top), left: clampHoriz(cand.left) };
       // Penalidade extrema se cobrir qualquer pixel do botão trigger (com 6px de folga para respiro de clique)
       const triggerOverlap = getOverlapArea(c.top, c.left, [triggerRect], 6);
       const priorOverlap = getOverlapArea(c.top, c.left, priorPopups, GAP);
-      const dist = Math.hypot(c.top - (prefAboveTop >= MARGIN ? prefAboveTop : prefBelowTop), c.left - prefRightLeft);
+      const dist = Math.hypot(c.top - idealTop, c.left - prefRightLeft);
+
+      // Penaliza fortemente candidatos que desçam abaixo do botão (invadindo a área do gráfico do card)
+      const belowTriggerPx = Math.max(0, (c.top + popupH) - triggerRect.bottom);
+      const chartCoverPenalty = (c.top >= triggerRect.bottom ? 50000 : 0) + belowTriggerPx * 40;
 
       // triggerOverlap recebe peso de 10 milhões para NUNCA ficar em cima do botão de exclamação
-      const score = (triggerOverlap > 0 ? 10000000 + triggerOverlap * 1000 : 0) + priorOverlap * 10000 + dist;
+      const score =
+        (triggerOverlap > 0 ? 10000000 + triggerOverlap * 1000 : 0) +
+        priorOverlap * 10000 +
+        chartCoverPenalty +
+        dist;
       if (score < bestScore) {
         bestScore = score;
         best = c;
       }
     }
 
-    setPos({ top: best.top, left: best.left, opacity: 1 });
+    setPos({ top: best.top, left: best.left, opacity: 1, maxHeight: targetMaxH });
   }, [triggerRect, badge.episodes.length]);
 
   // Fechar com Escape
@@ -1988,7 +2018,7 @@ const AlertPopupPortal: React.FC<{
         zIndex: 99999,
         minWidth: 280,
         maxWidth: 400,
-        maxHeight: 360,
+        maxHeight: pos.maxHeight,
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',

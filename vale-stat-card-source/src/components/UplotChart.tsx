@@ -740,22 +740,15 @@ export const UplotChart: React.FC<UplotChartProps> = ({
               const cursorY = cy + chartTop;
               const cursorX = cx + chartLeft;
 
-              // 2. Lógica Anti-Sobreposição (Jogar para o lado)
-              let calculatedTop: number;
-              if (cursorY < tooltipHeight + 20) {
-                // Se não houver espaço em cima, alinha o centro do tooltip com o cursor (joga "para o lado")
-                calculatedTop = cursorY - tooltipHeight / 2;
-              } else {
-                // Padrão: posiciona o tooltip ACIMA da bolinha
-                calculatedTop = cursorY - tooltipHeight - 12;
-              }
-
-              // Trava de segurança no topo: nunca sobe mais do que o início útil do gráfico
-              let safeTop = Math.max(chartTop + 8, calculatedTop);
+              // 2. Posicionamento preferencial ACIMA do ponto para não tampar o gráfico
+              // Permite que o tooltip suba até a faixa superior do card (acima de chartTop)
+              const calculatedTop = cursorY - tooltipHeight - 14;
+              const minAllowedTop = -Math.min(tooltipHeight - 8, 72);
+              let safeTop = Math.max(minAllowedTop, calculatedTop);
 
               // Trava de segurança na base: se for cortar embaixo, joga o tooltip para cima
               if (safeTop + tooltipHeight > chartTop + chartHeight) {
-                safeTop = chartTop + chartHeight - tooltipHeight - 8;
+                safeTop = Math.max(minAllowedTop, chartTop + chartHeight - tooltipHeight - 8);
               }
 
               // 3. Lógica de Inversão Horizontal (Direita -> Esquerda)
