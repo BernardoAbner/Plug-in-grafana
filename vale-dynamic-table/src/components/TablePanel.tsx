@@ -1,4 +1,5 @@
 import React, { useMemo, useRef, useState, useLayoutEffect, useCallback } from 'react';
+import 'uplot/dist/uPlot.min.css';
 import {
   PanelProps,
   Field,
@@ -6,7 +7,7 @@ import {
   getFieldDisplayName,
   GrafanaTheme2,
 } from '@grafana/data';
-import { SimpleOptions, CustomFieldConfig, NativeThresholdsConfig } from '../types';
+import { SimpleOptions, NativeThresholdsConfig, ThresholdComparisonMode, LineInterpolation } from '../types';
 import { FilterBadgePopover, ColumnFilterConfig } from './ColumnFilterModal';
 import { css } from '@emotion/css';
 import { useStyles2, Icon, useTheme2 } from '@grafana/ui';
@@ -15,9 +16,11 @@ import {
   AlertEpisode,
   getAlertEpisodes,
   formatFieldValue,
-  getActiveNativeThreshold,
+  resolveColumnThreshold,
   getFieldExactMatch,
   getFieldThresholds,
+  getFieldOverrideProperty,
+  getEffectiveCustomConfig,
   resolveAlertHexColor,
   resolveIconName,
   AlertBadgePopover,
@@ -30,11 +33,11 @@ import {
   SegmentedBarRenderer,
   DeltaTrendRenderer,
   HeatmapStrip,
-  TimeSeriesRenderer,
   PanelInteractionContext,
   PanelInteractionContextValue,
   getHealthyToneSteps,
 } from './CellRenderers';
+import { TableSparklineCell, SparklineSeries } from './TableSparklineCell';
 
 export {
   BadgeRenderer,
@@ -42,7 +45,6 @@ export {
   SegmentedBarRenderer,
   DeltaTrendRenderer,
   HeatmapStrip,
-  TimeSeriesRenderer,
   PanelInteractionContext,
   getHealthyToneSteps,
 } from './CellRenderers';
@@ -74,6 +76,7 @@ export interface MetricCellData {
   tEnd: number;
   thresholds?: NativeThresholdsConfig;
   exactMatch: boolean;
+  comparisonMode: ThresholdComparisonMode;
   displayMode: string;
 }
 
@@ -131,22 +134,106 @@ function formatTimeHHmmss(ts: number): string {
   return `${hh}:${mm}:${ss}`;
 }
 
+export function isGenericName(name?: string | null): boolean {
+  if (!name) return true;
+  const s = name.trim().toLowerCase();
+  return (
+    s === '' ||
+    s === 'value' ||
+    s === 'val' ||
+    s === 'values' ||
+    s === 'metric' ||
+    s === 'métrica' ||
+    s === 'metricas' ||
+    s === 'series' ||
+    s === 'serie' ||
+    s === 'data' ||
+    s === 'null' ||
+    s === 'undefined'
+  );
+}
+
 export interface TimeAxisSplit {
   timestamp: number;
   label: string;
   pct: number;
 }
 
+export const CANDIDATE_STEPS_MS = [
+  1 * 1000,                  // 1s
+  2 * 1000,                  // 2s
+  5 * 1000,                  // 5s
+  10 * 1000,                 // 10s
+  15 * 1000,                 // 15s
+  30 * 1000,                 // 30s
+  60 * 1000,                 // 1m
+  2 * 60 * 1000,             // 2m
+  5 * 60 * 1000,             // 5m
+  10 * 60 * 1000,            // 10m
+  15 * 60 * 1000,            // 15m
+  20 * 60 * 1000,            // 20m
+  30 * 60 * 1000,            // 30m
+  45 * 60 * 1000,            // 45m
+  60 * 60 * 1000,            // 1h
+  2 * 60 * 60 * 1000,        // 2h
+  3 * 60 * 60 * 1000,        // 3h
+  4 * 60 * 60 * 1000,        // 4h
+  6 * 60 * 60 * 1000,        // 6h
+  8 * 60 * 60 * 1000,        // 8h
+  12 * 60 * 60 * 1000,       // 12h
+  24 * 60 * 60 * 1000,       // 1d (24h)
+  2 * 24 * 60 * 60 * 1000,   // 2d
+  3 * 24 * 60 * 60 * 1000,   // 3d
+  7 * 24 * 60 * 60 * 1000,   // 7d (1w)
+  14 * 24 * 60 * 60 * 1000,  // 14d (2w)
+  30 * 24 * 60 * 60 * 1000,  // 30d (~1mo)
+  60 * 24 * 60 * 60 * 1000,  // 60d (~2mo)
+  90 * 24 * 60 * 60 * 1000,  // 90d (~1 quarter)
+  180 * 24 * 60 * 60 * 1000, // 180d (~half year)
+  365 * 24 * 60 * 60 * 1000, // 365d (1y)
+];
+
+export function formatTickLabel(ts: number, spansDays: boolean, stepMs: number): string {
+  const d = new Date(ts);
+  const hours = String(d.getHours()).padStart(2, '0');
+  const mins = String(d.getMinutes()).padStart(2, '0');
+  const timeStr = `${hours}:${mins}`;
+
+  // Se o passo for menor que 1 minuto, exibe também os segundos
+  if (stepMs < 60 * 1000) {
+    const secs = String(d.getSeconds()).padStart(2, '0');
+    return `${timeStr}:${secs}`;
+  }
+
+  // Se o intervalo total abrange múltiplos dias
+  if (spansDays) {
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    // Se o passo é de 1 dia ou mais (ex: 1d, 2d, 7d), basta a data sem hora
+    if (stepMs >= 24 * 60 * 60 * 1000) {
+      return `${day}/${month}`;
+    }
+    return `${day}/${month} ${timeStr}`;
+  }
+
+  return timeStr;
+}
+
 /**
- * Gera splits temporais para o Eixo de Tempo idênticos ao uPlot / vale-time-series.
- * Utiliza passos temporais limpos e formatação tabular DD/MM HH:mm ou HH:mm.
+ * Gera splits temporais para o Eixo de Tempo de forma totalmente adaptativa e robusta.
+ * Aumenta ou diminui dinamicamente a quantidade de horários exibidos com base na largura horizontal (widthOrSplits).
+ * Alinha perfeitamente os horários ao relógio local (00:00, 06:00, etc.) evitando sobreposição de textos.
  */
 export function generateTimeAxisSplits(
   tStart: number,
   tEnd: number,
-  targetSplits = 6
+  widthOrSplits: number = 300
 ): TimeAxisSplit[] {
   const spanMs = Math.max(1, tEnd - tStart);
+  if (!Number.isFinite(tStart) || !Number.isFinite(tEnd) || spanMs <= 0) {
+    return [];
+  }
+
   const minDate = new Date(tStart);
   const maxDate = new Date(tEnd);
   const spansDays =
@@ -154,78 +241,229 @@ export function generateTimeAxisSplits(
     minDate.getMonth() !== maxDate.getMonth() ||
     minDate.getFullYear() !== maxDate.getFullYear();
 
-  const candidateStepsMs = [
-    5 * 1000,
-    10 * 1000,
-    15 * 1000,
-    30 * 1000,
-    60 * 1000,
-    2 * 60 * 1000,
-    5 * 60 * 1000,
-    10 * 60 * 1000,
-    15 * 60 * 1000,
-    30 * 60 * 1000,
-    60 * 60 * 1000,
-    2 * 60 * 60 * 1000,
-    3 * 60 * 60 * 1000,
-    6 * 60 * 60 * 1000,
-    12 * 60 * 60 * 1000,
-    24 * 60 * 60 * 1000,
-    48 * 60 * 60 * 1000,
-    7 * 24 * 60 * 60 * 1000,
-  ];
+  // Determina a largura disponível em pixels
+  // Se for passado um número pequeno (<= 30), interpreta como contagem alvo de splits
+  const pixelWidth = widthOrSplits > 30 ? widthOrSplits : Math.max(60, widthOrSplits * 75);
 
-  const targetStep = spanMs / Math.max(1, targetSplits);
-  let chosenStep = candidateStepsMs[candidateStepsMs.length - 1];
-  for (const step of candidateStepsMs) {
-    if (step >= targetStep) {
+  // Seleciona o melhor passo (step) onde a distância horizontal entre ticks não cause sobreposição
+  let chosenStep = CANDIDATE_STEPS_MS[CANDIDATE_STEPS_MS.length - 1];
+
+  for (const step of CANDIDATE_STEPS_MS) {
+    const isStepDayPlus = step >= 24 * 60 * 60 * 1000;
+    const labelIsLong = spansDays && !isStepDayPlus;
+    // Rótulos como "21/10 14:00" precisam de ~85px; rótulos como "14:00" ou "21/10" precisam de ~55px
+    const minSpacingPx = labelIsLong ? 85 : 55;
+
+    const stepDistancePx = (step / spanMs) * pixelWidth;
+    if (stepDistancePx >= minSpacingPx) {
       chosenStep = step;
       break;
     }
   }
 
-  const formatTickLabel = (ts: number): string => {
-    const d = new Date(ts);
-    const hours = String(d.getHours()).padStart(2, '0');
-    const mins = String(d.getMinutes()).padStart(2, '0');
-    const timeStr = `${hours}:${mins}`;
-    if (spansDays) {
-      const day = String(d.getDate()).padStart(2, '0');
-      const month = String(d.getMonth() + 1).padStart(2, '0');
-      return `${day}/${month} ${timeStr}`;
+  // Alinhamento ao relógio local
+  let firstTick = tStart;
+  if (chosenStep >= 24 * 60 * 60 * 1000) {
+    const startDay = new Date(tStart);
+    startDay.setHours(0, 0, 0, 0);
+    let t = startDay.getTime();
+    while (t < tStart) {
+      t += chosenStep;
     }
-    return timeStr;
-  };
+    firstTick = t;
+  } else {
+    const tzOffsetMs = new Date(tStart).getTimezoneOffset() * 60 * 1000;
+    const localTStart = tStart - tzOffsetMs;
+    const firstLocalTick = Math.ceil(localTStart / chosenStep) * chosenStep;
+    firstTick = firstLocalTick + tzOffsetMs;
+  }
 
   const splits: TimeAxisSplit[] = [];
-  const firstTick = Math.ceil(tStart / chosenStep) * chosenStep;
 
   for (let t = firstTick; t <= tEnd; t += chosenStep) {
     const pct = ((t - tStart) / spanMs) * 100;
-    if (pct >= 2 && pct <= 98) {
+    if (pct >= 0 && pct <= 100) {
       splits.push({
         timestamp: t,
-        label: formatTickLabel(t),
+        label: formatTickLabel(t, spansDays, chosenStep),
         pct,
       });
     }
   }
 
+  // Garantia de robustez: se tiver menos de 2 splits (ex: janela muito curta ou container muito estreito),
+  // exibe pelo menos os 2 extremos limpos
   if (splits.length < 2) {
-    splits.length = 0;
-    const count = Math.max(2, Math.min(targetSplits, 4));
-    for (let i = 0; i <= count; i++) {
-      const t = tStart + (spanMs * i) / count;
-      const pct = (i / count) * 100;
-      splits.push({
-        timestamp: t,
-        label: formatTickLabel(t),
-        pct,
-      });
-    }
+    return [
+      {
+        timestamp: tStart,
+        label: formatTickLabel(tStart, spansDays, chosenStep),
+        pct: 0,
+      },
+      {
+        timestamp: tEnd,
+        label: formatTickLabel(tEnd, spansDays, chosenStep),
+        pct: 100,
+      },
+    ];
   }
 
   return splits;
+}
+
+export interface ResponsiveTimeAxisProps {
+  tStart: number;
+  tEnd: number;
+  fallbackWidth?: number;
+  style?: React.CSSProperties;
+  className?: string;
+}
+
+export const ResponsiveTimeAxis: React.FC<ResponsiveTimeAxisProps> = ({
+  tStart,
+  tEnd,
+  fallbackWidth = 300,
+  style,
+  className,
+}) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [measuredWidth, setMeasuredWidth] = useState<number>(fallbackWidth);
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) {
+      return undefined;
+    }
+
+    const measure = () => {
+      const w = el.clientWidth;
+      if (w > 0) {
+        setMeasuredWidth((prev) => (Math.abs(prev - w) > 2 ? w : prev));
+      }
+    };
+
+    measure();
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(() => {
+        measure();
+      });
+      ro.observe(el);
+      return () => {
+        ro.disconnect();
+      };
+    }
+
+    return undefined;
+  }, []);
+
+  const splits = useMemo(() => {
+    return generateTimeAxisSplits(tStart, tEnd, measuredWidth);
+  }, [tStart, tEnd, measuredWidth]);
+
+  return (
+    <div
+      ref={containerRef}
+      className={className}
+      style={{
+        position: 'relative',
+        width: '100%',
+        height: '16px',
+        lineHeight: '16px',
+        overflow: 'hidden',
+        userSelect: 'none',
+        ...style,
+      }}
+    >
+      {splits.map((split) => {
+        const isStart = split.pct <= 3;
+        const isEnd = split.pct >= 97;
+        return (
+          <div
+            key={split.timestamp}
+            style={{
+              position: 'absolute',
+              left: `${split.pct}%`,
+              top: 0,
+              bottom: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: isStart ? 'flex-start' : isEnd ? 'flex-end' : 'center',
+              transform: isStart
+                ? 'translateX(0)'
+                : isEnd
+                ? 'translateX(-100%)'
+                : 'translateX(-50%)',
+              pointerEvents: 'none',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {/* Pequeno traço superior indicando a marcação precisa do tick */}
+            <div
+              style={{
+                width: 1,
+                height: 2,
+                backgroundColor: 'rgba(255, 255, 255, 0.25)',
+                marginBottom: 1,
+                alignSelf: isStart ? 'flex-start' : isEnd ? 'flex-end' : 'center',
+              }}
+            />
+            <span
+              style={{
+                fontSize: '10px',
+                lineHeight: '13px',
+                fontWeight: 500,
+                fontVariantNumeric: 'tabular-nums',
+                color: 'rgba(255, 255, 255, 0.52)',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {split.label}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+/**
+ * Retorna o estilo industrial vitrificado padronizado para ícones.
+ * Quando habilitado (contained), o fundo, a borda e o brilho sutil assumem dinamicamente a cor do próprio ícone.
+ */
+export function getGlassyIconStyle(
+  iconColor: string,
+  isContained = true,
+  size = 22,
+  borderRadius = 5
+): React.CSSProperties {
+  if (!isContained) {
+    return {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: size,
+      height: size,
+      backgroundColor: 'transparent',
+      border: 'none',
+      boxShadow: 'none',
+      flexShrink: 0,
+    };
+  }
+
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: size,
+    height: size,
+    borderRadius,
+    backgroundColor: `color-mix(in srgb, ${iconColor} 18%, transparent)`,
+    border: `1px solid color-mix(in srgb, ${iconColor} 30%, transparent)`,
+    boxShadow: `0 0 6px color-mix(in srgb, ${iconColor} 16%, transparent)`,
+    flexShrink: 0,
+    transition: 'all 0.2s ease',
+  };
 }
 
 export interface WindowDiagnosisResult {
@@ -333,6 +571,16 @@ const getStyles = (theme: GrafanaTheme2) => {
       border-radius: 12px;
       overflow: hidden;
       font-family: ${theme.typography.fontFamily};
+
+      .u-select {
+        background: rgba(128, 128, 128, 0.2);
+        outline: 1px solid rgba(128, 128, 128, 0.4);
+        outline-offset: -1px;
+        border: none !important;
+        position: absolute;
+        pointer-events: none;
+        z-index: 10;
+      }
     `,
     scrollContainer: css`
       position: relative;
@@ -394,7 +642,7 @@ const getStyles = (theme: GrafanaTheme2) => {
       text-align: left;
     `,
     tr: css`
-      height: ${ROW_HEIGHT}px;
+      min-height: 20px;
       border-bottom: 1px solid rgba(255, 255, 255, 0.035);
       transition: background-color 0.12s ease;
       &:hover {
@@ -409,6 +657,25 @@ const getStyles = (theme: GrafanaTheme2) => {
       vertical-align: middle;
       box-sizing: border-box;
       color: rgba(255, 255, 255, 0.85);
+    `,
+    tfoot: css`
+      position: sticky;
+      bottom: 0;
+      z-index: 10;
+      background: #0c141d;
+    `,
+    tfootTd: css`
+      position: sticky;
+      bottom: 0;
+      z-index: 10;
+      background-color: #0c141d;
+      color: rgba(255, 255, 255, 0.45);
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      padding: 4px 8px;
+      user-select: none;
+      box-sizing: border-box;
+      box-shadow: 0 -3px 8px rgba(0, 0, 0, 0.5);
     `,
     colResizer: css`
       position: absolute;
@@ -470,7 +737,7 @@ const getStyles = (theme: GrafanaTheme2) => {
   };
 };
 
-export let currentActivePanelMode: 'table' | 'heatmap' = 'table';
+export let currentActivePanelMode: 'table' | 'singleHost' | 'heatmap' = 'table';
 
 export const TablePanel: React.FC<Props> = ({
   id: panelId,
@@ -479,6 +746,8 @@ export const TablePanel: React.FC<Props> = ({
   width,
   height,
   fieldConfig,
+  timeRange,
+  onChangeTimeRange,
 }) => {
   currentActivePanelMode = options.panelMode ?? 'table';
   if (typeof window !== 'undefined') {
@@ -486,6 +755,18 @@ export const TablePanel: React.FC<Props> = ({
   }
   const theme = useTheme2();
   const styles = useStyles2(getStyles);
+
+  const handleCellTimeZoom = useCallback(
+    (range: { from: number; to: number }) => {
+      if (onChangeTimeRange) {
+        onChangeTimeRange({
+          from: range.from,
+          to: range.to,
+        });
+      }
+    },
+    [onChangeTimeRange]
+  );
 
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -560,7 +841,6 @@ export const TablePanel: React.FC<Props> = ({
   });
 
   const [columnFilters, setColumnFilters] = useState<Record<string, ColumnFilterConfig>>({});
-  const [singleHostViewOverride, setSingleHostViewOverride] = useState<'keyvalue' | 'table' | null>(null);
 
   const handleApplyColumnFilter = useCallback((colKey: string, filter: ColumnFilterConfig | null) => {
     setColumnFilters((prev) => {
@@ -688,25 +968,6 @@ export const TablePanel: React.FC<Props> = ({
     const hostsSet = new Set<string>();
     const metricsSet = new Set<string>();
 
-    const isGenericName = (name?: string | null): boolean => {
-      if (!name) return true;
-      const s = name.trim().toLowerCase();
-      return (
-        s === '' ||
-        s === 'value' ||
-        s === 'val' ||
-        s === 'values' ||
-        s === 'metric' ||
-        s === 'métrica' ||
-        s === 'metricas' ||
-        s === 'series' ||
-        s === 'serie' ||
-        s === 'data' ||
-        s === 'null' ||
-        s === 'undefined'
-      );
-    };
-
     // 1. Verifica se qualquer série possui identificador explícito de host (via labels ou campos string)
     let anyExplicitHostInDataset = false;
     data.series.forEach((df) => {
@@ -771,7 +1032,7 @@ export const TablePanel: React.FC<Props> = ({
           ? targetField.values
           : Array.from(targetField.values as any);
 
-        const custom = (targetField.config?.custom ?? {}) as CustomFieldConfig;
+        const custom = getEffectiveCustomConfig(targetField, fieldConfig);
 
         // 1. Extração do Host por labels ou campo string
         const labelHost =
@@ -789,43 +1050,95 @@ export const TablePanel: React.FC<Props> = ({
           targetField.labels?.Instance ||
           stringHostVal;
 
-        // Separador em displayName (ex: "Host: Métrica")
-        const rawDisplayName = getFieldDisplayName(targetField, df).trim();
-        const sepMatch = rawDisplayName.match(/^(.+?)\s*(?::\s*|\s+-\s+|\s+\/\s+|\s+>\s+|\s+·\s+)(.+)$/);
-        const sepHost = sepMatch ? sepMatch[1].trim() : '';
-        const sepMetric = sepMatch ? sepMatch[2].trim() : '';
-
-        // 2. Extração da Métrica por labels
-        const labelMetric =
-          targetField.labels?.__name__ ||
-          targetField.labels?.metric ||
-          targetField.labels?.item ||
-          targetField.labels?.metric_name ||
-          targetField.labels?.item_name ||
-          targetField.labels?.name ||
-          targetField.labels?.key;
-
-        const customMetric = custom?.label?.trim() || targetField.config?.displayName?.trim();
-
-        // 3. Resolução rigorosa do Nome da Métrica (nunca aceita 'Value' se houver outro identificador)
-        let resolvedMetric = '';
-        if (customMetric) {
-          resolvedMetric = customMetric;
-        } else if (labelMetric) {
-          resolvedMetric = labelMetric;
-        } else if (sepMetric) {
-          resolvedMetric = sepMetric;
-        } else if (!isGenericName(targetField.name) && targetField.name !== labelHost && targetField.name !== sepHost) {
-          resolvedMetric = targetField.name;
-        } else if (!isGenericName(df.name) && df.name !== labelHost && df.name !== sepHost) {
-          resolvedMetric = df.name!;
-        } else if (!isGenericName(rawDisplayName) && rawDisplayName !== labelHost && rawDisplayName !== sepHost) {
-          resolvedMetric = rawDisplayName;
-        } else if (df.refId) {
-          resolvedMetric = `Métrica ${df.refId}`;
-        } else {
-          resolvedMetric = dataFields.length > 1 ? `Métrica ${targetFieldIndex + 1}` : `Métrica ${dfIndex + 1}`;
+        // Separador em displayName (ex: "Host: Métrica" ou "Group : Host : Métrica")
+        // Preserva o displayName original do datasource para não sofrer mutação em re-renders
+        targetField.state = targetField.state || {};
+        if (!(targetField.state as any).__origDisplayName) {
+          (targetField.state as any).__origDisplayName = getFieldDisplayName(targetField, df).trim();
         }
+        const rawDisplayName: string = (targetField.state as any).__origDisplayName;
+        const sepSegments = rawDisplayName
+          .split(/\s*(?::\s*|\s+-\s+|\s+\/\s+|\s+>\s+|\s+·\s+)/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+
+        let sepHost = '';
+        let sepMetric = '';
+        if (sepSegments.length === 2) {
+          sepHost = sepSegments[0];
+          sepMetric = sepSegments[1];
+        } else if (sepSegments.length >= 3) {
+          // Em formatos com 3+ partes (ex: "DCDC : SW-01 : ICMP ping" ou "Grupo : Host : Item"):
+          // O último segmento é sempre o nome do Item/Métrica!
+          sepMetric = sepSegments[sepSegments.length - 1];
+          if (labelHost && sepSegments.includes(labelHost)) {
+            sepHost = labelHost;
+          } else {
+            sepHost = sepSegments[sepSegments.length - 2] || sepSegments[0];
+          }
+        }
+
+        // Fallback para displayNameFromDS caso displayName não tenha separador
+        const dsName = targetField.config?.displayNameFromDS?.trim();
+        if (!sepMetric && dsName) {
+          const dsSegments = dsName
+            .split(/\s*(?::\s*|\s+-\s+|\s+\/\s+|\s+>\s+|\s+·\s+)/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+          if (dsSegments.length >= 2) {
+            sepMetric = dsSegments[dsSegments.length - 1];
+            if (!sepHost) {
+              sepHost = dsSegments[0];
+            }
+          } else if (dsSegments.length === 1 && !isGenericName(dsSegments[0])) {
+            sepMetric = dsSegments[0];
+          }
+        }
+
+        // 2. Extração da Métrica por labels específicas de métrica/item (evita tags genéricas como 'name' ou 'key')
+        const labelMetric =
+          targetField.labels?.item ||
+          targetField.labels?.item_name ||
+          targetField.labels?.itemName ||
+          targetField.labels?.itemname ||
+          targetField.labels?.Item ||
+          targetField.labels?.metric ||
+          targetField.labels?.Metric ||
+          targetField.labels?.metric_name ||
+          targetField.labels?.__name__ ||
+          targetField.labels?.item_description;
+
+        // 3. Resolução rigorosa do Nome Base da Métrica vindo do Zabbix (sem overrides de label)
+        let baseZabbixMetric = '';
+        if (labelMetric) {
+          baseZabbixMetric = labelMetric;
+        } else if (sepMetric) {
+          baseZabbixMetric = sepMetric;
+        } else if (!isGenericName(targetField.name) && targetField.name !== labelHost && targetField.name !== sepHost) {
+          baseZabbixMetric = targetField.name;
+        } else if (!isGenericName(df.name) && df.name !== labelHost && df.name !== sepHost) {
+          baseZabbixMetric = df.name!;
+        } else if (!isGenericName(rawDisplayName) && rawDisplayName !== labelHost && rawDisplayName !== sepHost) {
+          baseZabbixMetric = rawDisplayName;
+        } else if (df.refId) {
+          baseZabbixMetric = `Métrica ${df.refId}`;
+        } else {
+          baseZabbixMetric = dataFields.length > 1 ? `Métrica ${targetFieldIndex + 1}` : `Métrica ${dfIndex + 1}`;
+        }
+
+        // Atualiza displayName no state do field com o nome real da métrica do Zabbix
+        // para que o seletor de Overrides ("Fields with name") sempre reconheça a métrica original
+        targetField.state.displayName = String(baseZabbixMetric).trim() || 'Métrica';
+
+        // No modo Heatmap, o nome da métrica vem sempre do Zabbix e só é sobrescrito por
+        // options.heatmapCustomLabel ("Rótulo do Cabeçalho (Heatmap)" no menu do Heatmap).
+        // Nos modos de Tabela / Host Único, aceita sobrescrita via Override Properties ('label').
+        const overrideCustomLabel =
+          options.panelMode === 'heatmap'
+            ? undefined
+            : getFieldOverrideProperty<string>(targetField, 'label', fieldConfig)?.trim();
+
+        const resolvedMetric = overrideCustomLabel || baseZabbixMetric;
 
         // 4. Resolução do Nome do Host
         let resolvedHost = '';
@@ -847,12 +1160,6 @@ export const TablePanel: React.FC<Props> = ({
         if (mat[cleanHost] && mat[cleanHost][cleanMetric]) {
           const suffix = df.refId ? ` (${df.refId})` : ` (#${dfIndex + 1})`;
           cleanMetric = `${cleanMetric}${suffix}`;
-        }
-
-        // Atualiza displayName no state do field para que o seletor de Overrides ("Fields with name")
-        // reconheça perfeitamente a métrica
-        if (targetField.state) {
-          targetField.state.displayName = cleanMetric;
         }
 
         const exactMatch = getFieldExactMatch(targetField, options.exactThresholdMatch, fieldConfig);
@@ -882,6 +1189,14 @@ export const TablePanel: React.FC<Props> = ({
         const formattedLastVal =
           lastVal !== null ? formatFieldValue(lastVal, targetField, theme) : { text: '—' };
 
+        const overrideCompMode = targetField
+          ? getFieldOverrideProperty<ThresholdComparisonMode>(targetField, 'thresholdComparisonMode', fieldConfig)
+          : undefined;
+        const comparisonMode: ThresholdComparisonMode =
+          overrideCompMode ??
+          options.thresholdComparisonMode ??
+          (exactMatch ? 'eq' : 'gte');
+
         // Histórico de episódios na janela (apenas para métricas numéricas com thresholds)
         const episodes = !isStringField
           ? getAlertEpisodes(
@@ -890,38 +1205,27 @@ export const TablePanel: React.FC<Props> = ({
               thresholds,
               tStart,
               tEnd,
-              exactMatch,
+              comparisonMode,
               disconnectThreshold
             )
           : [];
 
-        // Avalia se há violação ativa agora (somente se ultrapassar o threshold configurado)
-        const currentStep =
-          !isStringField && typeof lastVal === 'number'
-            ? getActiveNativeThreshold(lastVal, thresholds, exactMatch)
-            : null;
-        const sortedThresholdSteps = [...(thresholds?.steps || [])].sort((a, b) => {
-          const av = a.value !== null && a.value !== undefined ? Number(a.value) : -Infinity;
-          const bv = b.value !== null && b.value !== undefined ? Number(b.value) : -Infinity;
-          return av - bv;
-        });
-        const baseThresholdStep = sortedThresholdSteps[0];
-        const isCurrentStepViolation = Boolean(
-          currentStep &&
-          currentStep !== baseThresholdStep &&
-          currentStep.value !== null &&
-          currentStep.value !== undefined &&
-          Number(currentStep.value) !== -Infinity &&
-          !isNaN(Number(currentStep.value))
+        // Avaliação universal via resolveColumnThreshold
+        const thrResult = resolveColumnThreshold(
+          !isStringField && typeof lastVal === 'number' ? lastVal : null,
+          thresholds,
+          comparisonMode,
+          theme
         );
-        const hasActiveEpisode = episodes.some((ep) => ep.isActiveNow);
 
+        const isCurrentStepViolation = thrResult.isViolation;
+        const hasActiveEpisode = episodes.some((ep) => ep.isActiveNow);
         const isActiveNow = isCurrentStepViolation || hasActiveEpisode;
 
         // Determina a cor do threshold violado (para destaque)
         let corDoThreshold = '#F2495C';
-        if (isCurrentStepViolation && currentStep?.color) {
-          corDoThreshold = resolveAlertHexColor(currentStep.color);
+        if (isCurrentStepViolation) {
+          corDoThreshold = thrResult.color;
         } else if (hasActiveEpisode) {
           const highestActive = episodes.find((ep) => ep.isActiveNow);
           if (highestActive) {
@@ -929,6 +1233,8 @@ export const TablePanel: React.FC<Props> = ({
           }
         } else if (formattedLastVal.color) {
           corDoThreshold = formattedLastVal.color;
+        } else {
+          corDoThreshold = thrResult.color;
         }
 
         const hasHistoricalAlert = !isActiveNow && episodes.length > 0;
@@ -944,7 +1250,7 @@ export const TablePanel: React.FC<Props> = ({
               tEnd,
               theme,
               corDoThreshold,
-              exactMatch,
+              comparisonMode,
               disconnectThreshold
             )
           : { state: 'normal' as const, color: '', episodes: [] };
@@ -966,9 +1272,11 @@ export const TablePanel: React.FC<Props> = ({
 
         const iconName = resolveIconName(custom.icon || 'server');
 
-        // Lê displayMode vindo do Override do Grafana ou das opções gerais do painel
+        // Lê displayMode vindo do Override do Grafana (ou pacote composto) ou das opções gerais do painel
         // Campos string sempre renderizam normalmente usando o estilo "Texto/Valor"
+        const overrideMode = getFieldOverrideProperty<string>(targetField, 'cellDisplayMode', fieldConfig);
         const rawMode =
+          overrideMode ||
           custom.cellDisplayMode ||
           custom.displayMode ||
           custom.statusDisplayMode ||
@@ -1002,14 +1310,15 @@ export const TablePanel: React.FC<Props> = ({
           avgVal,
           iconName,
           activeStepValue:
-            currentStep?.value !== null && currentStep?.value !== undefined
-              ? Number(currentStep.value)
+            thrResult.activeStep?.value !== null && thrResult.activeStep?.value !== undefined
+              ? Number(thrResult.activeStep.value)
               : undefined,
           lastEpisodeStart: episodes.length > 0 ? episodes[0].startTs : undefined,
           tStart,
           tEnd,
           thresholds,
           exactMatch,
+          comparisonMode,
           displayMode,
         };
 
@@ -1056,7 +1365,11 @@ export const TablePanel: React.FC<Props> = ({
         0
       );
 
-      const iconName = resolveIconName(options.hostIconName || 'server');
+      const iconName = resolveIconName(
+        options.panelMode === 'heatmap'
+          ? (options.heatmapHostIconName || options.hostIconName || 'server')
+          : (options.hostIconName || 'server')
+      );
 
       return {
         hostName,
@@ -1142,7 +1455,7 @@ export const TablePanel: React.FC<Props> = ({
       // 3º: 100% Saudáveis (ordem alfabética por nome do Host)
       return a.hostName.localeCompare(b.hostName, undefined, { numeric: true, sensitivity: 'base' });
     });
-  }, [uniqueHosts, matrix, sortConfig, options.hostIconName]);
+  }, [uniqueHosts, matrix, sortConfig, options.hostIconName, options.heatmapHostIconName, options.panelMode]);
 
   // ── 3. Renderização Dinâmica de Célula via switch/case baseado no displayMode ──
   const renderMetricCell = (
@@ -1154,22 +1467,57 @@ export const TablePanel: React.FC<Props> = ({
     const isStringField = s.field.type === FieldType.string;
     const effectiveMode = isStringField ? 'text' : mode;
 
-    const custom = (s.field.config?.custom ?? {}) as CustomFieldConfig;
+    const custom = getEffectiveCustomConfig(s.field, fieldConfig);
+    const overrideUseThreshold = s?.field
+      ? getFieldOverrideProperty<boolean>(s.field, 'useThresholdColors', fieldConfig)
+      : undefined;
     const useThresholdColors = Boolean(
-      custom.useThresholdColors ?? custom.colorValueByThreshold ?? options.useThresholdColors ?? false
+      overrideUseThreshold !== undefined
+        ? overrideUseThreshold
+        : (options.useThresholdColors ?? false)
     );
     const defaultTextColor = 'rgba(255, 255, 255, 0.72)';
+    const overrideCompMode = s?.field
+      ? getFieldOverrideProperty<ThresholdComparisonMode>(s.field, 'thresholdComparisonMode', fieldConfig)
+      : undefined;
+    const compMode: ThresholdComparisonMode =
+      overrideCompMode ??
+      s.comparisonMode ??
+      options.thresholdComparisonMode ??
+      (s.exactMatch ? 'eq' : 'gte');
+    const thrResult = resolveColumnThreshold(
+      typeof s.lastVal === 'number' ? s.lastVal : null,
+      s.thresholds,
+      compMode,
+      theme
+    );
+
     const textColor = useThresholdColors
       ? (s.isActiveNow
           ? s.corDoThreshold
-          : (s.formattedLastVal.color || defaultTextColor))
+          : (thrResult.isViolation ? thrResult.color : defaultTextColor))
       : defaultTextColor;
 
-    // Universalidade do botão ! : qualquer métrica com Threshold e alerta (ativo ou histórico na janela)
-    const enableAlertPopup = custom.enableAlertPopup ?? options.enableAlertPopup ?? true;
-    const hasThresholdAndAlert = Boolean(
-      (s.thresholds?.steps?.length || s.field.config?.thresholds?.steps?.length) &&
-      (s.isActiveNow || s.hasHistoricalAlert || (s.badge && s.badge.state !== 'normal'))
+    // Configuração do botão ! e Pop-up de alerta (respeita override específico e fallback global do painel)
+    const overrideEnableAlert = s?.field
+      ? getFieldOverrideProperty<boolean>(s.field, 'enableAlertPopup', fieldConfig)
+      : undefined;
+    const enableAlertPopup = overrideEnableAlert !== undefined
+      ? overrideEnableAlert
+      : (options.enableAlertPopup ?? true);
+
+    const overrideAlertMode = s?.field
+      ? getFieldOverrideProperty<'always' | 'alertOnly'>(s.field, 'alertPopupDisplayMode', fieldConfig)
+      : undefined;
+    const alertPopupMode = overrideAlertMode ?? options.alertPopupDisplayMode ?? 'always';
+    const hasHistoricalProblem = Boolean(s.hasHistoricalAlert || (s.episodes && s.episodes.length > 0));
+    const hasActiveProblem = Boolean(s.isActiveNow);
+    const hasAnyAlert = hasActiveProblem || hasHistoricalProblem;
+
+    const canShowAlert = enableAlertPopup && (
+      alertPopupMode === 'alertOnly'
+        ? hasActiveProblem
+        : hasAnyAlert
     );
 
     const effectiveBadge: BadgeInfo =
@@ -1181,8 +1529,6 @@ export const TablePanel: React.FC<Props> = ({
             episodes: s.episodes || [],
           };
 
-    const canShowAlert = enableAlertPopup && hasThresholdAndAlert && effectiveBadge.state !== 'normal';
-
     const renderAlertButton = () => {
       if (!canShowAlert) return null;
       return (
@@ -1192,12 +1538,14 @@ export const TablePanel: React.FC<Props> = ({
           tEnd={tEnd}
           styles={styles}
           field={s.field}
-          exactMatch={s.exactMatch}
+          exactMatch={compMode === 'eq'}
+          comparisonMode={compMode}
           fieldConfig={fieldConfig}
           metricLabel={`${hostName} · ${metricName}`}
           currentValueText={s.formattedLastVal.text}
           currentValueColor={textColor}
           size={18}
+          allowNormal={false}
         />
       );
     };
@@ -1209,13 +1557,98 @@ export const TablePanel: React.FC<Props> = ({
         const valueMode: 'badge' | 'text' | 'hidden' =
           rawValueMode === 'badge' || rawValueMode === 'hidden' ? rawValueMode : 'text';
 
+        const overrideFollowThreshold = s?.field
+          ? getFieldOverrideProperty<boolean>(s.field, 'sparklineFollowThreshold', fieldConfig)
+          : undefined;
+        const followThreshold = Boolean(
+          overrideFollowThreshold ??
+          custom.sparklineFollowThreshold ??
+          options.sparklineFollowThreshold ??
+          false
+        );
+        // Respeita estritamente a cor configurada na coluna (lineColor) quando definida pelo usuário (override ou custom)
+        const overrideLineColor = s?.field
+          ? getFieldOverrideProperty<string>(s.field, 'lineColor', fieldConfig)
+          : undefined;
+        const customLineColor = (overrideLineColor ?? custom.lineColor)?.trim();
+        const hasCustomLineColor = Boolean(customLineColor);
+        const normalLineColor = hasCustomLineColor
+          ? customLineColor!
+          : (thrResult.baseStep?.color ? resolveAlertHexColor(thrResult.baseStep.color) : '#00B59B');
+        const activeLineColor = followThreshold
+          ? (s.isActiveNow
+              ? s.corDoThreshold
+              : (thrResult.isViolation ? thrResult.color : normalLineColor))
+          : normalLineColor;
+
         const badgeColor = useThresholdColors
-          ? s.isActiveNow
-            ? s.corDoThreshold
-            : s.hasHistoricalAlert
-            ? '#EAB839'
-            : '#73BF69'
+          ? (s.isActiveNow
+              ? s.corDoThreshold
+              : (thrResult.isViolation ? thrResult.color : (s.formattedLastVal.color || thrResult.color)))
           : (s.formattedLastVal.color || undefined);
+
+        const overrideBinaryStep = s?.field
+          ? getFieldOverrideProperty<boolean>(s.field, 'binaryStepHighlight', fieldConfig)
+          : undefined;
+        const binaryStep = Boolean(
+          overrideBinaryStep ??
+          custom.binaryStepHighlight ??
+          options.binaryStepHighlight ??
+          false
+        );
+        const overrideLineWidth = s?.field
+          ? getFieldOverrideProperty<number>(s.field, 'lineWidth', fieldConfig)
+          : undefined;
+        const resolvedLineWidth = overrideLineWidth ?? custom.lineWidth ?? 1.5;
+
+        const overrideAreaOpacity = s?.field
+          ? getFieldOverrideProperty<number>(s.field, 'areaOpacity', fieldConfig)
+          : undefined;
+        const resolvedAreaOpacity = overrideAreaOpacity ?? custom.areaOpacity ?? custom.sparklineFillOpacity ?? 25;
+
+        const overrideLineOpacity = s?.field
+          ? getFieldOverrideProperty<number>(s.field, 'sparklineLineOpacity', fieldConfig)
+          : undefined;
+        const resolvedLineOpacity = overrideLineOpacity ?? custom.sparklineLineOpacity ?? 100;
+
+        const overrideInterpolation = s?.field
+          ? getFieldOverrideProperty<LineInterpolation>(s.field, 'lineInterpolation', fieldConfig)
+          : undefined;
+        const resolvedInterpolation = (overrideInterpolation ?? custom.lineInterpolation) || 'smooth';
+
+        const overrideSparklineHeight = s?.field
+          ? getFieldOverrideProperty<number>(s.field, 'sparklineHeight', fieldConfig)
+          : undefined;
+        const resolvedSparklineHeight = overrideSparklineHeight ?? custom.sparklineHeight;
+
+        const rowSeries: SparklineSeries[] = [
+          {
+            name: metricName,
+            field: s.field,
+            values: s.values,
+            color: activeLineColor,
+            lineWidth: resolvedLineWidth,
+            areaOpacity: resolvedAreaOpacity,
+            lineOpacity: resolvedLineOpacity,
+            lineInterpolation: binaryStep ? 'stepBefore' : resolvedInterpolation,
+            binaryStepHighlight: binaryStep,
+            episodes: (followThreshold || binaryStep) ? s.episodes : [],
+            thresholds: s.thresholds,
+          },
+        ];
+        const rowTimestamps = s.timeValues;
+        const overrideShowXAxis = s?.field
+          ? getFieldOverrideProperty<boolean>(s.field, 'showXAxis', fieldConfig)
+          : undefined;
+        const showCellXAxis = overrideShowXAxis ?? custom.showXAxis ?? options.showXAxis ?? false;
+        const currentRowHeight = (options.panelMode === 'singleHost' && options.singleHostRowHeight && options.singleHostRowHeight >= 20)
+          ? options.singleHostRowHeight
+          : effectiveRowHeight;
+        // Altura dinâmica aproveitando o máximo da linha da tabela ou override customizado
+        const cellHeight = resolvedSparklineHeight || Math.max(currentRowHeight - (showCellXAxis ? 8 : 10), 20);
+        const cellWidth = colWidths[metricName]
+          ? Math.max(colWidths[metricName] - (valueMode !== 'hidden' ? 65 : 15), 60)
+          : undefined;
 
         return (
           <div
@@ -1253,20 +1686,19 @@ export const TablePanel: React.FC<Props> = ({
                 {renderAlertButton()}
               </div>
             )}
-            <div style={{ flex: 1, minWidth: 50, height: 20 }}>
-              <TimeSeriesRenderer
-                values={s.values}
-                timeValues={s.timeValues}
-                tStart={tStart}
-                tEnd={tEnd}
-                lineColor={useThresholdColors ? s.corDoThreshold : (custom.lineColor || '#00B59B')}
-                lineWidth={custom.lineWidth ?? 1.5}
-                areaOpacity={custom.areaOpacity ?? 25}
-                lineInterpolation={custom.lineInterpolation || 'smooth'}
-                disconnectThreshold={disconnectThreshold}
-                height={20}
-                columnKey={metricName}
-                formatValue={(val) => formatFieldValue(val, s.field, theme).text}
+            <div style={{ flex: 1, minWidth: 50, height: `${cellHeight}px`, position: 'relative' }}>
+              <TableSparklineCell
+                width={cellWidth}
+                height={cellHeight}
+                times={rowTimestamps}
+                series={rowSeries}
+                theme={theme}
+                showXAxis={showCellXAxis}
+                timeRange={{
+                  from: timeRange ? timeRange.from.valueOf() : tStart,
+                  to: timeRange ? timeRange.to.valueOf() : tEnd,
+                }}
+                onChangeTimeRange={handleCellTimeZoom}
               />
             </div>
             {valueMode === 'hidden' && renderAlertButton()}
@@ -1300,11 +1732,9 @@ export const TablePanel: React.FC<Props> = ({
 
       case 'badge': {
         const badgeColor = useThresholdColors
-          ? s.isActiveNow
-            ? s.corDoThreshold
-            : s.hasHistoricalAlert
-            ? '#EAB839'
-            : (s.formattedLastVal.color || s.corDoThreshold || '#73BF69')
+          ? (s.isActiveNow
+              ? s.corDoThreshold
+              : (thrResult.isViolation ? thrResult.color : (s.formattedLastVal.color || thrResult.color)))
           : (s.formattedLastVal.color || undefined);
 
         return (
@@ -1332,6 +1762,10 @@ export const TablePanel: React.FC<Props> = ({
         const showVal = custom.showProgressValue ?? true;
         const barHeight = custom.progressHeight ?? '6px';
         const numVal = typeof s.lastVal === 'number' ? s.lastVal : null;
+        const barThrResult = resolveColumnThreshold(numVal, s.thresholds, compMode, theme);
+        const barColor = useThresholdColors
+          ? (s.isActiveNow ? s.corDoThreshold : (barThrResult.isViolation ? barThrResult.color : (custom.lineColor || '#00B59B')))
+          : (custom.lineColor || '#00B59B');
 
         return (
           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, width: '100%', minWidth: 0 }}>
@@ -1340,8 +1774,10 @@ export const TablePanel: React.FC<Props> = ({
                 value={numVal}
                 min={progMin}
                 max={progMax}
-                color={s.corDoThreshold}
+                color={barColor}
                 useThreshold={useThresholdColors}
+                thresholds={s.thresholds}
+                comparisonMode={compMode}
                 formattedValue={s.formattedLastVal.text}
                 showValueText={showVal}
                 height={barHeight}
@@ -1358,6 +1794,11 @@ export const TablePanel: React.FC<Props> = ({
         const segMax = custom.progressMax ?? 100;
         const showVal = custom.showProgressValue ?? true;
         const numVal = typeof s.lastVal === 'number' ? s.lastVal : null;
+        const segThrResult = resolveColumnThreshold(numVal, s.thresholds, compMode, theme);
+        const segColor = useThresholdColors
+          ? (s.isActiveNow ? s.corDoThreshold : (segThrResult.isViolation ? segThrResult.color : (custom.lineColor || '#00B59B')))
+          : (custom.lineColor || '#00B59B');
+        const isActiveThreshold = useThresholdColors && (s.isActiveNow || segThrResult.isViolation);
 
         return (
           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
@@ -1365,10 +1806,14 @@ export const TablePanel: React.FC<Props> = ({
               value={numVal}
               min={segMin}
               max={segMax}
-              color={s.corDoThreshold}
-              isActiveThreshold={useThresholdColors && s.isActiveNow}
+              color={segColor}
+              useThreshold={useThresholdColors}
+              thresholds={s.thresholds}
+              comparisonMode={compMode}
+              isActiveThreshold={isActiveThreshold}
               formattedValue={s.formattedLastVal.text}
               showValueText={showVal}
+              defaultColor={custom.lineColor || '#00B59B'}
             />
             {renderAlertButton()}
           </div>
@@ -1378,19 +1823,49 @@ export const TablePanel: React.FC<Props> = ({
       case 'deltatrend': {
         const numVal = typeof s.lastVal === 'number' ? s.lastVal : null;
         const showDelta = custom.showDeltaValue ?? true;
+        const colorMode = custom.deltaTrendColorMode ?? 'proximity';
+        const deltaRefMode = custom.deltaReferenceMode || 'mean';
+        const deltaComparisonDir = custom.deltaComparisonDirection || custom.thresholdComparisonMode || s.comparisonMode || 'gte';
+        const proximityPct = custom.deltaProximityPct ?? custom.deltaProximityMargin ?? 20;
+
+        // Extrai referência conforme deltaReferenceMode ('mean', 'first', 'prev')
+        const validVals = (s.values || []).filter((v: any) => typeof v === 'number' && !isNaN(v));
+        let refVal: number | null = null;
+        if (deltaRefMode === 'first') {
+          refVal = validVals.length > 0 ? validVals[0] : (s.avgVal ?? numVal);
+        } else if (deltaRefMode === 'prev') {
+          refVal = validVals.length > 1 ? validVals[validVals.length - 2] : (validVals[0] ?? s.avgVal ?? numVal);
+        } else {
+          refVal = s.avgVal !== null && s.avgVal !== undefined && !isNaN(Number(s.avgVal))
+            ? Number(s.avgVal)
+            : (validVals.length > 0 ? validVals.reduce((a: number, b: number) => a + b, 0) / validVals.length : numVal);
+        }
+
+        const rawDelta = numVal !== null && refVal !== null ? numVal - refVal : 0;
+        const formattedDelta = showDelta && numVal !== null && refVal !== null
+          ? formatFieldValue(Math.abs(rawDelta), s.field, theme).text
+          : undefined;
+
         return (
           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
             <DeltaTrendRenderer
               current={numVal}
-              periodAvg={s.avgVal}
+              values={s.values}
+              periodAvg={refVal}
               formattedCurrent={s.formattedLastVal.text}
-              formattedDelta={
-                showDelta && numVal !== null && s.avgVal !== null
-                  ? formatFieldValue(Math.abs(numVal - s.avgVal), s.field, theme).text
-                  : undefined
-              }
+              formattedDelta={formattedDelta}
+              showDeltaValue={showDelta}
+              thresholds={s.thresholds}
               thresholdColor={s.corDoThreshold}
-              isActiveThreshold={useThresholdColors && s.isActiveNow}
+              isActiveThreshold={s.isActiveNow}
+              deltaReferenceMode={deltaRefMode}
+              deltaValueFormat={custom.deltaValueFormat}
+              deltaDeadbandPct={custom.deltaDeadbandPct}
+              deltaProximityPct={proximityPct}
+              deltaComparisonDirection={deltaComparisonDir}
+              deltaHighlightRelief={custom.deltaHighlightRelief}
+              useThresholdColors={useThresholdColors}
+              colorMode={colorMode}
             />
             {renderAlertButton()}
           </div>
@@ -1505,6 +1980,23 @@ export const TablePanel: React.FC<Props> = ({
   const bottomSpacerHeight = Math.max(0, (totalRows - endIndex) * effectiveRowHeight);
   const totalCols = 1 + uniqueMetrics.length;
 
+  const isMetricTimeSeries = useCallback(
+    (metricName: string): boolean => {
+      for (const host of sortedHosts) {
+        const s = host.metrics[metricName];
+        if (s) {
+          return s.displayMode === 'timeseries' || s.displayMode === 'sparkline';
+        }
+      }
+      return options.cellDisplayMode === 'sparkline' || options.cellDisplayMode === 'timeseries';
+    },
+    [sortedHosts, options.cellDisplayMode]
+  );
+
+  const hasAnyTimeSeries = useMemo(() => {
+    return uniqueMetrics.some(isMetricTimeSeries);
+  }, [uniqueMetrics, isMetricTimeSeries]);
+
   if (sortedHosts.length === 0 || uniqueMetrics.length === 0) {
     return (
       <div className={styles.container}>
@@ -1552,22 +2044,30 @@ export const TablePanel: React.FC<Props> = ({
     const hostColWidth = colWidths['__heatmap_host__'] ?? options.heatmapHostWidth ?? 180;
     const nowColWidth = colWidths['__heatmap_now__'] ?? options.heatmapNowWidth ?? 72;
     const heatmapGridColumns = `${hostColWidth}px minmax(120px, 1fr) ${nowColWidth}px`;
-    const metricHeaderLabel =
-      referenceCell?.field?.config?.custom?.label ||
-      referenceCell?.field?.config?.displayName ||
-      referenceCell?.field?.name ||
-      primaryMetricName ||
-      'Host';
+    const rawZabbixItemLabel =
+      referenceCell?.field?.labels?.item ||
+      referenceCell?.field?.labels?.item_name ||
+      referenceCell?.field?.labels?.itemName ||
+      referenceCell?.field?.labels?.itemname ||
+      referenceCell?.field?.labels?.Item ||
+      referenceCell?.field?.labels?.metric ||
+      referenceCell?.field?.labels?.Metric ||
+      referenceCell?.field?.labels?.metric_name;
+
+    const defaultMetricHeaderLabel =
+      (rawZabbixItemLabel && !isGenericName(rawZabbixItemLabel) ? rawZabbixItemLabel.trim() : '') ||
+      (primaryMetricName && !isGenericName(primaryMetricName) ? primaryMetricName : '') ||
+      (referenceCell?.metricName && !isGenericName(referenceCell.metricName) ? referenceCell.metricName : '') ||
+      (referenceCell?.field?.name && !isGenericName(referenceCell.field.name) ? referenceCell.field.name : '') ||
+      'Métrica';
+    const metricHeaderLabel = options.heatmapCustomLabel?.trim() || defaultMetricHeaderLabel;
 
     // Largura disponível para o centro do gráfico (quadradinhos + eixo X)
     const availableChartWidth = Math.max(80, width - hostColWidth - nowColWidth - 44);
-    // Adapta dinamicamente os rótulos do eixo X de acordo com a largura real do gráfico
-    const dynamicTargetSplits = Math.max(2, Math.min(10, Math.floor(availableChartWidth / 90)));
-    const timeSplits = generateTimeAxisSplits(tStart, tEnd, dynamicTargetSplits);
 
-    const showHostIcon = options.showHostIcon ?? true;
-    const defaultHostIcon = options.hostIconName || 'server';
-    const hostIconBgMode = options.hostIconBgMode ?? 'contained';
+    const showHostIcon = options.heatmapShowHostIcon ?? options.showHostIcon ?? true;
+    const defaultHostIcon = options.heatmapHostIconName || options.hostIconName || 'server';
+    const hostIconBgMode = options.heatmapHostIconBgMode ?? options.hostIconBgMode ?? 'contained';
 
     return (
       <PanelInteractionContext.Provider key={panelId} value={panelInteractionContextValue}>
@@ -1586,39 +2086,79 @@ export const TablePanel: React.FC<Props> = ({
             <div ref={crosshairTimeRef} className={styles.globalCrosshairTimeBadge} />
           </div>
 
-          {/* Rótulo Superior elegante para o Heatmap (sem estilo de cabeçalho tabular) */}
+          {/* Cabeçalho das Colunas do Heatmap com Filtros e Ordenação */}
           {(options.showHeatmapHeader ?? true) && (
             <div
               style={{
-                display: 'flex',
+                display: 'grid',
+                gridTemplateColumns: heatmapGridColumns,
                 alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '6px 14px 4px 14px',
-                background: 'transparent',
+                gap: '12px',
+                padding: '0 14px',
+                minHeight: '32px',
+                backgroundColor: '#0c141d',
+                borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
                 flexShrink: 0,
                 userSelect: 'none',
+                boxSizing: 'border-box',
+                zIndex: 10,
               }}
             >
+              {/* Coluna 1: HOST / DISPOSITIVO com Filtro */}
               <div
-                onClick={() => handleSort('__host__')}
                 style={{
-                  display: 'inline-flex',
-                  flexDirection: 'column',
-                  gap: 1,
-                  cursor: 'pointer',
+                  position: 'relative',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 6,
+                  minWidth: 0,
+                  height: '100%',
+                  paddingRight: 10,
+                  borderRight: '1px solid rgba(255, 255, 255, 0.04)',
+                  boxSizing: 'border-box',
                 }}
-                title="Clique para ordenar por Host"
               >
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    overflow: 'hidden',
+                    minWidth: 0,
+                    cursor: 'pointer',
+                  }}
+                  onClick={() => handleSort('__host__')}
+                  title="Clique para ordenar por Host"
+                >
+                  <div onClick={(e) => e.stopPropagation()} style={{ flexShrink: 0 }}>
+                    <FilterBadgePopover
+                      colKey="__host__"
+                      colTitle={options.heatmapHostLabel?.trim() || 'HOST / DISPOSITIVO'}
+                      currentFilter={columnFilters['__host__']}
+                      getUniqueValues={() =>
+                        Array.from(new Set(sortedHosts.map((h) => h.hostName))).sort((a, b) =>
+                          a.localeCompare(b, undefined, { numeric: true })
+                        )
+                      }
+                      theme={theme}
+                      onApply={handleApplyColumnFilter}
+                      size={18}
+                    />
+                  </div>
                   <span
                     style={{
-                      fontSize: '12px',
+                      fontSize: '11px',
                       fontWeight: 600,
-                      letterSpacing: '0.02em',
-                      color: 'rgba(255, 255, 255, 0.88)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.04em',
+                      color: 'rgba(255, 255, 255, 0.65)',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
                     }}
                   >
-                    {options.heatmapCustomLabel?.trim() || metricHeaderLabel}
+                    {options.heatmapHostLabel?.trim() || 'HOST / DISPOSITIVO'}
                   </span>
                   {sortConfig.column === '__host__' && (
                     <Icon
@@ -1628,17 +2168,121 @@ export const TablePanel: React.FC<Props> = ({
                     />
                   )}
                 </div>
-                {options.heatmapCustomSubtitle?.trim() && (
-                  <span
-                    style={{
-                      fontSize: '10px',
-                      color: 'rgba(255, 255, 255, 0.45)',
-                      lineHeight: 1.2,
-                    }}
-                  >
-                    {options.heatmapCustomSubtitle.trim()}
-                  </span>
-                )}
+
+                {/* Alça de redimensionamento da coluna de Host */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    right: -6,
+                    top: 0,
+                    bottom: 0,
+                    width: '12px',
+                    cursor: 'col-resize',
+                    zIndex: 5,
+                  }}
+                  onMouseDown={(e) => handleResizeMouseDown('__heatmap_host__', e)}
+                  title="Arrastar para ajustar largura da coluna"
+                />
+              </div>
+
+              {/* Coluna 2: MÉTRICA com Filtro */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 6,
+                  minWidth: 0,
+                  height: '100%',
+                  cursor: primaryMetricName ? 'pointer' : 'default',
+                }}
+                onClick={() => primaryMetricName && handleSort(primaryMetricName)}
+                title={primaryMetricName ? `Clique para ordenar por ${primaryMetricName}` : undefined}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    overflow: 'hidden',
+                    minWidth: 0,
+                  }}
+                >
+                  {primaryMetricName && (
+                    <div onClick={(e) => e.stopPropagation()} style={{ flexShrink: 0 }}>
+                      <FilterBadgePopover
+                        colKey={primaryMetricName}
+                        colTitle={metricHeaderLabel}
+                        currentFilter={columnFilters[primaryMetricName]}
+                        getUniqueValues={() => {
+                          const valuesSet = new Set<string>();
+                          sortedHosts.forEach((h) => {
+                            const s = h.metrics[primaryMetricName] || Object.values(h.metrics)[0];
+                            if (s && s.formattedLastVal && s.formattedLastVal.text) {
+                              valuesSet.add(s.formattedLastVal.text);
+                            }
+                          });
+                          return Array.from(valuesSet).sort((a, b) =>
+                            a.localeCompare(b, undefined, { numeric: true })
+                          );
+                        }}
+                        theme={theme}
+                        onApply={handleApplyColumnFilter}
+                        size={18}
+                      />
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0, overflow: 'hidden' }}>
+                    <span
+                      style={{
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.04em',
+                        color: 'rgba(255, 255, 255, 0.65)',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                      title={metricHeaderLabel}
+                    >
+                      {metricHeaderLabel}
+                    </span>
+                    {sortConfig.column === primaryMetricName && (
+                      <Icon
+                        name={sortConfig.direction === 'asc' ? 'arrow-up' : 'arrow-down'}
+                        size="xs"
+                        style={{ color: '#38bdf8', flexShrink: 0 }}
+                      />
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Coluna 3: Espaçador do cabeçalho alinhado à coluna de Agora */}
+              <div
+                style={{
+                  position: 'relative',
+                  height: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'flex-end',
+                }}
+              >
+                {/* Alça de redimensionamento da coluna de Agora */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: -6,
+                    top: 0,
+                    bottom: 0,
+                    width: '12px',
+                    cursor: 'col-resize',
+                    zIndex: 5,
+                  }}
+                  onMouseDown={(e) => handleResizeMouseDown('__heatmap_now__', e)}
+                  title="Arrastar para ajustar largura da coluna de Agora"
+                />
               </div>
             </div>
           )}
@@ -1651,38 +2295,58 @@ export const TablePanel: React.FC<Props> = ({
               overflowX: 'hidden',
             }}
           >
-            {sortedHosts.map((host, rowIdx) => {
-              const s =
-                host.metrics[primaryMetricName] || Object.values(host.metrics)[0];
-              const isEven = rowIdx % 2 === 1;
-              const rowBg = isEven ? 'rgba(0, 0, 0, 0.18)' : 'transparent';
+            {filteredHosts.length === 0 ? (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  height: 100,
+                  color: 'rgba(255, 255, 255, 0.45)',
+                  fontSize: '12px',
+                  fontStyle: 'italic',
+                }}
+              >
+                Nenhum resultado encontrado para os filtros aplicados.
+              </div>
+            ) : (
+              filteredHosts.map((host, rowIdx) => {
+                const s =
+                  host.metrics[primaryMetricName] || Object.values(host.metrics)[0];
+                const isEven = rowIdx % 2 === 1;
+                const rowBg = isEven ? 'rgba(0, 0, 0, 0.18)' : 'transparent';
 
-              const custom = (s?.field?.config?.custom ?? {}) as CustomFieldConfig;
-              const enableAlertPopup = custom.enableAlertPopup ?? options.enableAlertPopup ?? true;
-              const hasThresholdAndAlert = Boolean(
-                s &&
-                  (s.thresholds?.steps?.length || s.field.config?.thresholds?.steps?.length) &&
-                  (s.isActiveNow || s.hasHistoricalAlert || (s.badge && s.badge.state !== 'normal'))
-              );
-              const effectiveBadge: BadgeInfo =
-                s && s.badge && s.badge.state !== 'normal'
-                  ? s.badge
-                  : {
-                      state: s?.isActiveNow
-                        ? 'active'
-                        : s?.hasHistoricalAlert
-                        ? 'historical'
-                        : 'normal',
-                      color:
-                        s?.corDoThreshold ||
-                        (s?.hasHistoricalAlert ? '#EAB839' : '#F2495C'),
-                      episodes: s?.episodes || [],
-                    };
-              const canShowAlert =
-                Boolean(s) &&
-                enableAlertPopup &&
-                hasThresholdAndAlert &&
-                effectiveBadge.state !== 'normal';
+                const overrideEnableAlert = s?.field
+                  ? getFieldOverrideProperty<boolean>(s.field, 'enableAlertPopup', fieldConfig)
+                  : undefined;
+                const enableAlertPopup = overrideEnableAlert !== undefined
+                  ? overrideEnableAlert
+                  : (options.enableAlertPopup ?? true);
+                const overrideAlertMode = s?.field
+                  ? getFieldOverrideProperty<'always' | 'alertOnly'>(s.field, 'alertPopupDisplayMode', fieldConfig)
+                  : undefined;
+                const alertPopupMode = overrideAlertMode ?? options.alertPopupDisplayMode ?? 'always';
+                const hasHistoricalProblem = Boolean(s?.hasHistoricalAlert || (s?.episodes && s.episodes.length > 0));
+                const hasActiveProblem = Boolean(s?.isActiveNow);
+                const hasAnyAlert = hasActiveProblem || hasHistoricalProblem;
+                const effectiveBadge: BadgeInfo =
+                  s && s.badge && s.badge.state !== 'normal'
+                    ? s.badge
+                    : {
+                        state: s?.isActiveNow
+                          ? 'active'
+                          : s?.hasHistoricalAlert
+                          ? 'historical'
+                          : 'normal',
+                        color:
+                          s?.corDoThreshold ||
+                          (s?.hasHistoricalAlert ? '#EAB839' : '#F2495C'),
+                        episodes: s?.episodes || [],
+                      };
+                const canShowAlert =
+                  Boolean(s) &&
+                  enableAlertPopup &&
+                  (alertPopupMode === 'alertOnly' ? hasActiveProblem : hasAnyAlert);
 
               // Cor da coluna direita ("AGORA"): cor do threshold apenas quando ativo; caso contrário cor neutra padrão
               const nowColor = !s || s.lastVal === null || s.lastVal === undefined
@@ -1732,43 +2396,16 @@ export const TablePanel: React.FC<Props> = ({
                       }}
                     >
                       {showHostIcon && (() => {
-                        const colorByThreshold = options.colorHostIconByThreshold ?? false;
-                        const isThresholdActive =
-                          colorByThreshold &&
-                          Boolean(s?.isActiveNow || s?.hasHistoricalAlert || host.hasHistoricalAlert);
-                        const hostIconColor = isThresholdActive
-                          ? s?.isActiveNow
-                            ? s.corDoThreshold
-                            : '#EAB839'
-                          : 'rgba(255, 255, 255, 0.72)';
+                        const colorByThreshold = Boolean(options.heatmapColorHostIconByThreshold ?? options.colorHostIconByThreshold ?? false);
+                        const normalHostColor = 'rgba(255, 255, 255, 0.85)';
+                        const hostIconColor = colorByThreshold
+                          ? (s?.isActiveNow
+                              ? s.corDoThreshold
+                              : normalHostColor)
+                          : normalHostColor;
                         const isContained = hostIconBgMode === 'contained';
                         return (
-                          <div
-                            style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              width: 22,
-                              height: 22,
-                              borderRadius: 5,
-                              backgroundColor: isContained
-                                ? isThresholdActive
-                                  ? `color-mix(in srgb, ${hostIconColor} 18%, transparent)`
-                                  : 'rgba(255, 255, 255, 0.06)'
-                                : 'transparent',
-                              border: isContained
-                                ? isThresholdActive
-                                  ? `1px solid color-mix(in srgb, ${hostIconColor} 30%, transparent)`
-                                  : '1px solid rgba(255, 255, 255, 0.12)'
-                                : 'none',
-                              boxShadow:
-                                isContained && isThresholdActive
-                                  ? `0 0 6px color-mix(in srgb, ${hostIconColor} 18%, transparent)`
-                                  : 'none',
-                              flexShrink: 0,
-                              transition: 'all 0.2s ease',
-                            }}
-                          >
+                          <div style={getGlassyIconStyle(hostIconColor, isContained, 22, 5)}>
                             <Icon
                               name={resolveIconName(host.iconName || defaultHostIcon) as any}
                               size="sm"
@@ -1803,11 +2440,13 @@ export const TablePanel: React.FC<Props> = ({
                         styles={styles}
                         field={s.field}
                         exactMatch={s.exactMatch}
+                        comparisonMode={s.comparisonMode || (s.field ? getFieldOverrideProperty<ThresholdComparisonMode>(s.field, 'thresholdComparisonMode', fieldConfig) : undefined) || s.field.config?.custom?.thresholdComparisonMode || options.thresholdComparisonMode || (s.exactMatch ? 'eq' : 'gte')}
                         fieldConfig={fieldConfig}
                         metricLabel={`${host.hostName} · ${s.metricName}`}
                         currentValueText={s.formattedLastVal.text}
                         currentValueColor={nowColor}
                         size={18}
+                        allowNormal={false}
                       />
                     )}
 
@@ -1893,7 +2532,7 @@ export const TablePanel: React.FC<Props> = ({
                   </div>
                 </div>
               );
-            })}
+            }))}
 
             {/* Eixo de Tempo posicionado diretamente abaixo do último host monitorado */}
             <div
@@ -1918,52 +2557,13 @@ export const TablePanel: React.FC<Props> = ({
                 }}
               />
 
-              {/* Coluna 2: Apenas os horários perfeitamente alinhados na vertical */}
-              <div
-                style={{
-                  position: 'relative',
-                  width: '100%',
-                  height: '16px',
-                  lineHeight: '16px',
-                }}
-              >
-                {timeSplits.map((split) => {
-                  const isStart = split.pct <= 3;
-                  const isEnd = split.pct >= 97;
-                  return (
-                    <div
-                      key={split.timestamp}
-                      style={{
-                        position: 'absolute',
-                        left: `${split.pct}%`,
-                        top: 0,
-                        bottom: 0,
-                        display: 'flex',
-                        alignItems: 'center',
-                        transform: isStart
-                          ? 'translateX(0)'
-                          : isEnd
-                          ? 'translateX(-100%)'
-                          : 'translateX(-50%)',
-                        pointerEvents: 'none',
-                      }}
-                    >
-                      <span
-                        style={{
-                          fontSize: '10px',
-                          lineHeight: '16px',
-                          fontWeight: 500,
-                          fontVariantNumeric: 'tabular-nums',
-                          color: 'rgba(255, 255, 255, 0.45)',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {split.label}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
+              {/* Coluna 2: Apenas os horários perfeitamente alinhados na vertical com escala adaptativa */}
+              <ResponsiveTimeAxis
+                tStart={tStart}
+                tEnd={tEnd}
+                fallbackWidth={availableChartWidth}
+                style={{ width: '100%', height: '16px' }}
+              />
 
               {/* Coluna 3: 'AGORA' perfeitamente alinhado verticalmente com os horários do eixo X */}
               <div
@@ -2105,20 +2705,7 @@ export const TablePanel: React.FC<Props> = ({
     );
   }
 
-  const isSingleHostCondition = filteredHosts.length === 1;
-
-  let isSingleHostMode = false;
-  if (options.panelMode === 'table') {
-    if (singleHostViewOverride === 'keyvalue') {
-      isSingleHostMode = true;
-    } else if (singleHostViewOverride === 'table') {
-      isSingleHostMode = false;
-    } else if (options.singleHostLayout === 'keyvalue') {
-      isSingleHostMode = true;
-    } else if (options.singleHostLayout !== 'table' && isSingleHostCondition) {
-      isSingleHostMode = true;
-    }
-  }
+  const isSingleHostMode = options.panelMode === 'singleHost';
 
   if (isSingleHostMode && filteredHosts.length > 0) {
     const host = filteredHosts[0];
@@ -2131,59 +2718,34 @@ export const TablePanel: React.FC<Props> = ({
             <div ref={crosshairTimeRef} className={styles.globalCrosshairTimeBadge} />
           </div>
 
-          {/* Rótulo superior da visualização de host único */}
+          {/* Rótulo superior da visualização de host único (mesma altura exata do cabeçalho da tabela comum: 32px) */}
           <div
             style={{
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'flex-start',
-              gap: 12,
-              padding: '5px 14px',
+              gap: 10,
+              padding: '0 14px',
+              height: '32px',
+              minHeight: '32px',
+              maxHeight: '32px',
               borderBottom: '1px solid rgba(255, 255, 255, 0.04)',
               background: '#0c141d',
               flexShrink: 0,
+              boxSizing: 'border-box',
+              userSelect: 'none',
             }}
           >
-            {/* Botão switch on/off posicionado à esquerda com as cores neutras do plugin */}
-            <div
-              onClick={() => setSingleHostViewOverride('table')}
-              style={{
-                width: 26,
-                height: 14,
-                borderRadius: 7,
-                background: 'rgba(255, 255, 255, 0.22)',
-                border: '1px solid rgba(255, 255, 255, 0.38)',
-                position: 'relative',
-                cursor: 'pointer',
-                userSelect: 'none',
-                transition: 'background 0.2s ease, border-color 0.2s ease',
-                flexShrink: 0,
-              }}
-              title="Alternar para exibição em tabela (Desligar host único)"
-            >
-              <div
-                style={{
-                  position: 'absolute',
-                  top: 1,
-                  right: 1.5,
-                  width: 10,
-                  height: 10,
-                  borderRadius: '50%',
-                  background: '#ffffff',
-                  boxShadow: '0 1px 3px rgba(0, 0, 0, 0.55)',
-                }}
-              />
-            </div>
-
-            {/* Título e Subtexto como subtexto vertical */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
+            {/* Título do Host em linha única sem o badge/texto Operacional (sem ícone no cabeçalho) */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, overflow: 'hidden' }}>
               <span
                 style={{
-                  fontSize: '12px',
+                  fontSize: '11px',
                   fontWeight: 600,
-                  letterSpacing: '0.01em',
-                  color: 'rgba(255, 255, 255, 0.92)',
-                  lineHeight: 1.25,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.04em',
+                  color: 'rgba(255, 255, 255, 0.88)',
+                  lineHeight: '32px',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
@@ -2191,18 +2753,20 @@ export const TablePanel: React.FC<Props> = ({
               >
                 {options.singleHostCustomLabel?.trim() || host.hostName}
               </span>
-              <span
-                style={{
-                  fontSize: '9.5px',
-                  fontWeight: 400,
-                  color: host.isActiveNow
-                    ? (host.corDoThreshold || '#F2495C')
-                    : 'rgba(255, 255, 255, 0.45)',
-                  lineHeight: 1.2,
-                }}
-              >
-                {options.singleHostCustomStatusText?.trim() || (host.isActiveNow ? 'Em Alerta' : 'Operacional')}
-              </span>
+
+              {Boolean(options.singleHostCustomStatusText?.trim()) && (
+                <span
+                  style={{
+                    fontSize: '10px',
+                    color: 'rgba(255, 255, 255, 0.45)',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {options.singleHostCustomStatusText!.trim()}
+                </span>
+              )}
             </div>
           </div>
 
@@ -2220,8 +2784,14 @@ export const TablePanel: React.FC<Props> = ({
             {uniqueMetrics.map((metricName, mIdx) => {
               const s = host.metrics[metricName];
               const isEven = mIdx % 2 === 1;
-              const rowBg = isEven && enableZebra ? 'rgba(0, 0, 0, 0.18)' : 'transparent';
-              const custom = (s?.field?.config?.custom ?? {}) as CustomFieldConfig;
+              const singleHostRowHeight =
+                options.singleHostRowHeight && options.singleHostRowHeight >= 20
+                  ? options.singleHostRowHeight
+                  : effectiveRowHeight;
+              const singleHostEnableZebra =
+                options.singleHostEnableZebra ?? options.enableZebra ?? true;
+              const rowBg = isEven && singleHostEnableZebra ? 'rgba(0, 0, 0, 0.18)' : 'transparent';
+              const custom = getEffectiveCustomConfig(s?.field, fieldConfig);
 
               return (
                 <div
@@ -2230,8 +2800,10 @@ export const TablePanel: React.FC<Props> = ({
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
-                    padding: '9px 18px',
-                    minHeight: `${effectiveRowHeight}px`,
+                    padding: '0 18px',
+                    height: `${singleHostRowHeight}px`,
+                    minHeight: `${singleHostRowHeight}px`,
+                    boxSizing: 'border-box',
                     background: rowBg,
                     borderBottom: '1px solid rgba(255, 255, 255, 0.035)',
                     borderLeft: s?.isActiveNow
@@ -2249,13 +2821,61 @@ export const TablePanel: React.FC<Props> = ({
                       minWidth: 0,
                     }}
                   >
-                    {custom.icon && (
-                      <Icon
-                        name={resolveIconName(custom.icon) as any}
-                        size="sm"
-                        style={{ color: 'rgba(255, 255, 255, 0.5)', flexShrink: 0 }}
-                      />
-                    )}
+                    {(() => {
+                      const showMetricIcon = options.singleHostShowMetricIcon ?? true;
+
+                      if (!showMetricIcon) {
+                        return null;
+                      }
+
+                      const overrideIcon = s?.field
+                        ? getFieldOverrideProperty<string>(s.field, 'icon', fieldConfig)
+                        : undefined;
+                      const iconToRender =
+                        overrideIcon ||
+                        options.singleHostMetricIcon ||
+                        'server';
+
+                      const overrideColorByThreshold = s?.field
+                        ? getFieldOverrideProperty<boolean>(s.field, 'colorIconByThreshold', fieldConfig)
+                        : undefined;
+                      const colorByThreshold = Boolean(
+                        overrideColorByThreshold !== undefined
+                          ? overrideColorByThreshold
+                          : (options.singleHostColorMetricIconByThreshold ??
+                             options.colorHostIconByThreshold ??
+                             false)
+                      );
+
+                      const normalIconColor = 'rgba(255, 255, 255, 0.85)';
+                      const metricIconColor = colorByThreshold
+                        ? (s?.isActiveNow
+                            ? s.corDoThreshold
+                            : normalIconColor)
+                        : normalIconColor;
+
+                      const overrideIconStyle = s?.field
+                        ? getFieldOverrideProperty<'contained' | 'clean'>(s.field, 'iconStyle', fieldConfig)
+                        : undefined;
+                      const isContained = overrideIconStyle
+                        ? overrideIconStyle !== 'clean'
+                        : (options.singleHostMetricIconBgMode ?? 'contained') === 'contained';
+
+                      return (
+                        <div style={getGlassyIconStyle(metricIconColor, isContained, 22, 5)}>
+                          <Icon
+                            name={resolveIconName(iconToRender) as any}
+                            size="sm"
+                            style={{
+                              color: metricIconColor,
+                              width: isContained ? 13 : 15,
+                              height: isContained ? 13 : 15,
+                              flexShrink: 0,
+                            }}
+                          />
+                        </div>
+                      );
+                    })()}
                     <span
                       style={{
                         fontSize: '12px',
@@ -2266,7 +2886,7 @@ export const TablePanel: React.FC<Props> = ({
                         textOverflow: 'ellipsis',
                       }}
                     >
-                      {custom.label || metricName}
+                      {getFieldOverrideProperty<string>(s?.field, 'label', fieldConfig) || custom.label || metricName}
                     </span>
                   </div>
 
@@ -2303,40 +2923,6 @@ export const TablePanel: React.FC<Props> = ({
         <div ref={crosshairLineRef} className={styles.globalCrosshairLine}>
           <div ref={crosshairTimeRef} className={styles.globalCrosshairTimeBadge} />
         </div>
-
-        {isSingleHostCondition && options.showHeader === false && (
-          <div
-            onClick={() => setSingleHostViewOverride('keyvalue')}
-            style={{
-              position: 'absolute',
-              top: 6,
-              left: 8,
-              zIndex: 15,
-              width: 26,
-              height: 14,
-              borderRadius: 7,
-              background: 'rgba(255, 255, 255, 0.1)',
-              border: '1px solid rgba(255, 255, 255, 0.22)',
-              cursor: 'pointer',
-              userSelect: 'none',
-              flexShrink: 0,
-            }}
-            title="Alternar para visualização de host único (Ligar)"
-          >
-            <div
-              style={{
-                position: 'absolute',
-                top: 1,
-                left: 1.5,
-                width: 10,
-                height: 10,
-                borderRadius: '50%',
-                background: 'rgba(255, 255, 255, 0.7)',
-                boxShadow: '0 1px 2px rgba(0, 0, 0, 0.45)',
-              }}
-            />
-          </div>
-        )}
 
         <div className={styles.scrollContainer} ref={scrollRef} onScroll={handleScroll}>
           <table className={styles.table}>
@@ -2380,49 +2966,7 @@ export const TablePanel: React.FC<Props> = ({
                           theme={theme}
                           onApply={handleApplyColumnFilter}
                           size={18}
-                          isSingleHostMode={isSingleHostMode}
-                          onToggleSingleHostMode={
-                            isSingleHostCondition
-                              ? () => setSingleHostViewOverride(isSingleHostMode ? 'table' : 'keyvalue')
-                              : undefined
-                          }
                         />
-                      )}
-
-                      {/* Quando em tabela com 1 host: switch on/off compacto no cabeçalho sem ocupar espaço extra */}
-                      {isSingleHostCondition && (
-                        <div
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSingleHostViewOverride('keyvalue');
-                          }}
-                          style={{
-                            width: 26,
-                            height: 14,
-                            borderRadius: 7,
-                            background: 'rgba(255, 255, 255, 0.08)',
-                            border: '1px solid rgba(255, 255, 255, 0.16)',
-                            position: 'relative',
-                            cursor: 'pointer',
-                            userSelect: 'none',
-                            transition: 'background 0.2s ease, border-color 0.2s ease',
-                            flexShrink: 0,
-                          }}
-                          title="Alternar para visualização de host único (Ligar)"
-                        >
-                          <div
-                            style={{
-                              position: 'absolute',
-                              top: 1,
-                              left: 1.5,
-                              width: 10,
-                              height: 10,
-                              borderRadius: '50%',
-                              background: 'rgba(255, 255, 255, 0.65)',
-                              boxShadow: '0 1px 2px rgba(0, 0, 0, 0.45)',
-                            }}
-                          />
-                        </div>
                       )}
 
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -2446,7 +2990,8 @@ export const TablePanel: React.FC<Props> = ({
                 </th>
                 {uniqueMetrics.map((metricName) => {
                   const sampleField = sortedHosts[0]?.metrics[metricName]?.field;
-                  const customConfig = (sampleField?.config?.custom ?? {}) as CustomFieldConfig;
+                  const customConfig = getEffectiveCustomConfig(sampleField, fieldConfig);
+                  const metricLabel = customConfig.label?.trim() || metricName;
                   const isMetricFilterEnabled = customConfig.enableColumnFilter ?? false;
                   const isFilterActive = Boolean(
                     columnFilters[metricName] &&
@@ -2468,7 +3013,7 @@ export const TablePanel: React.FC<Props> = ({
                         zIndex: 10,
                       }}
                       onClick={() => handleSort(metricName)}
-                      title={`Clique para ordenar por ${metricName}`}
+                      title={`Clique para ordenar por ${metricLabel}`}
                     >
                       <div
                         style={{
@@ -2484,7 +3029,7 @@ export const TablePanel: React.FC<Props> = ({
                           {showMetricFilterIcon && (
                             <FilterBadgePopover
                               colKey={metricName}
-                              colTitle={metricName}
+                              colTitle={metricLabel}
                               currentFilter={columnFilters[metricName]}
                               getUniqueValues={() => {
                                 const valuesSet = new Set<string>();
@@ -2501,16 +3046,13 @@ export const TablePanel: React.FC<Props> = ({
                               theme={theme}
                               onApply={handleApplyColumnFilter}
                               size={18}
-                              isSingleHostMode={isSingleHostMode}
-                              onToggleSingleHostMode={
-                                isSingleHostCondition
-                                  ? () => setSingleHostViewOverride(isSingleHostMode ? 'table' : 'keyvalue')
-                                  : undefined
-                              }
                             />
                           )}
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {metricName}
+                          <span
+                            style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                            title={metricLabel}
+                          >
+                            {metricLabel}
                           </span>
                           {sortConfig.column === metricName && (
                             <Icon
@@ -2596,43 +3138,16 @@ export const TablePanel: React.FC<Props> = ({
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, overflow: 'hidden' }}>
                         {showHostIcon && (() => {
-                          const colorByThreshold = options.colorHostIconByThreshold ?? false;
-                          const isThresholdActive =
-                            colorByThreshold &&
-                            Boolean(host.isActiveNow || host.hasHistoricalAlert);
-                          const hostIconColor = isThresholdActive
-                            ? host.isActiveNow
-                              ? host.corDoThreshold
-                              : '#EAB839'
-                            : 'rgba(255, 255, 255, 0.72)';
+                          const colorByThreshold = Boolean(options.colorHostIconByThreshold ?? false);
+                          const normalHostColor = 'rgba(255, 255, 255, 0.85)';
+                          const hostIconColor = colorByThreshold
+                            ? (host.isActiveNow
+                                ? host.corDoThreshold
+                                : normalHostColor)
+                            : normalHostColor;
                           const isContained = hostIconBgMode === 'contained';
                           return (
-                            <div
-                              style={{
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                width: 22,
-                                height: 22,
-                                borderRadius: 5,
-                                backgroundColor: isContained
-                                  ? isThresholdActive
-                                    ? `color-mix(in srgb, ${hostIconColor} 18%, transparent)`
-                                    : 'rgba(255, 255, 255, 0.06)'
-                                  : 'transparent',
-                                border: isContained
-                                  ? isThresholdActive
-                                    ? `1px solid color-mix(in srgb, ${hostIconColor} 30%, transparent)`
-                                    : '1px solid rgba(255, 255, 255, 0.12)'
-                                  : 'none',
-                                boxShadow:
-                                  isContained && isThresholdActive
-                                    ? `0 0 6px color-mix(in srgb, ${hostIconColor} 18%, transparent)`
-                                    : 'none',
-                                flexShrink: 0,
-                                transition: 'all 0.2s ease',
-                              }}
-                            >
+                            <div style={getGlassyIconStyle(hostIconColor, isContained, 22, 5)}>
                               <Icon
                                 name={resolveIconName(host.iconName || defaultHostIcon) as any}
                                 size="sm"
@@ -2706,6 +3221,123 @@ export const TablePanel: React.FC<Props> = ({
                 </tr>
               )}
             </tbody>
+            {hasAnyTimeSeries && (
+              <tfoot className={styles.tfoot}>
+                <tr>
+                  {/* Coluna 1: Rodapé fixo do Host */}
+                  <td
+                    className={styles.tfootTd}
+                    style={{
+                      width: colWidths['__host__'],
+                      borderLeft: '2px solid transparent',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, height: '16px', lineHeight: '16px' }}>
+                      <span
+                        style={{
+                          fontSize: '10px',
+                          fontWeight: 600,
+                          letterSpacing: '0.04em',
+                          textTransform: 'uppercase',
+                          color: 'rgba(255, 255, 255, 0.4)',
+                        }}
+                      >
+                        Tempo
+                      </span>
+                    </div>
+                  </td>
+
+                  {/* Colunas Dinâmicas: Eixo Temporal dedicado para cada métrica Time Series */}
+                  {uniqueMetrics.map((metricName) => {
+                    const isTS = isMetricTimeSeries(metricName);
+                    if (!isTS) {
+                      return (
+                        <td
+                          key={metricName}
+                          className={styles.tfootTd}
+                          style={{
+                            width: colWidths[metricName],
+                          }}
+                        />
+                      );
+                    }
+
+                    // Encontra uma série representativa desta métrica para alinhar o espaçamento
+                    let sampleS: MetricCellData | undefined;
+                    for (const host of sortedHosts) {
+                      if (host.metrics[metricName]) {
+                        sampleS = host.metrics[metricName];
+                        break;
+                      }
+                    }
+
+                    const custom = getEffectiveCustomConfig(sampleS?.field, fieldConfig);
+                    const rawValueMode = custom.timeSeriesValueMode || options.timeSeriesValueMode || 'text';
+                    const valueMode = rawValueMode === 'badge' || rawValueMode === 'hidden' ? rawValueMode : 'text';
+
+                    // Largura de fallback da coluna
+                    const colW = Number.isFinite(parseInt(String(colWidths[metricName]), 10))
+                      ? parseInt(String(colWidths[metricName]), 10)
+                      : 200;
+
+                    return (
+                      <td
+                        key={metricName}
+                        className={styles.tfootTd}
+                        style={{
+                          width: colWidths[metricName],
+                          overflow: 'visible',
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            width: '100%',
+                            gap: '10px',
+                            height: '16px',
+                          }}
+                        >
+                          {/* Espaçador invisível emparelhado com o valor numérico à esquerda da linha do gráfico */}
+                          {valueMode !== 'hidden' && (
+                            <div
+                              style={{
+                                visibility: 'hidden',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 5,
+                                flexShrink: 0,
+                                pointerEvents: 'none',
+                                userSelect: 'none',
+                              }}
+                            >
+                              {valueMode === 'badge' ? (
+                                <div style={{ width: 44, height: 18 }} />
+                              ) : (
+                                <span style={{ fontSize: '11px', minWidth: '38px' }}>
+                                  {sampleS?.formattedLastVal?.text || '—'}
+                                </span>
+                              )}
+                              <div style={{ width: 18, height: 18 }} />
+                            </div>
+                          )}
+
+                          {/* Eixo de Tempo adaptativo da coluna, sincronizado dinamicamente com a largura real */}
+                          <ResponsiveTimeAxis
+                            tStart={tStart}
+                            tEnd={tEnd}
+                            fallbackWidth={colW}
+                            style={{ flex: 1, minWidth: 50, height: '16px' }}
+                          />
+                          {valueMode === 'hidden' && <div style={{ width: 18 }} />}
+                        </div>
+                      </td>
+                    );
+                  })}
+                </tr>
+              </tfoot>
+            )}
           </table>
         </div>
       </div>

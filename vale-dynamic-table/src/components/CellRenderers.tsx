@@ -14,8 +14,8 @@ import {
   estimateTypicalStepMs,
   resolveDisconnectThresholdMs,
 } from './UplotChart';
-import { NativeThresholdsConfig, DisconnectThresholdMode } from '../types';
-import { getActiveNativeThreshold, resolveAlertHexColor } from './SimplePanel';
+import { NativeThresholdsConfig, DisconnectThresholdMode, ThresholdComparisonMode, ThresholdStep, DeltaValueFormat } from '../types';
+import { getActiveNativeThreshold, resolveAlertHexColor, resolveColumnThreshold, AlertEpisode } from './SimplePanel';
 
 // ── Contexto de Isolamento Absoluto do Painel (PanelInteractionContext) ───────
 export interface PanelInteractionState {
@@ -336,12 +336,88 @@ export const BadgeRenderer: React.FC<BadgeRendererProps> = ({
 // ── 2. Estilo ProgressBar ────────────────────────────────────────────────────
 export type ProgressHeight = '6px' | '8px' | '12px';
 
+/**
+ * Constrói o gradiente inteligente CSS para a Barra de Progresso Contínua.
+ * Inicia no verde padrão (ou cor base saudável) e percorre as faixas de threshold (amarelo, laranja, vermelho)
+ * mapeadas ao longo de toda a escala [rangeMin, rangeMax].
+ */
+export function buildProgressBarGradient(
+  rangeMin: number,
+  rangeMax: number,
+  thresholds?: NativeThresholdsConfig,
+  comparisonMode: ThresholdComparisonMode = 'gte',
+  defaultColor = '#00B59B'
+): string {
+  const fallbackHealthy = '#10b981';
+  const effectiveBase = defaultColor || fallbackHealthy;
+
+  const validSteps = thresholds?.steps
+    ? thresholds.steps.filter((s) => s.value !== null && s.value !== undefined && !isNaN(Number(s.value)))
+    : [];
+
+  const rangeSpan = Math.max(1e-4, rangeMax - rangeMin);
+
+  // Caso 1: Sem thresholds configurados -> Gradiente inteligente clássico: Verde (0-55%) -> Amarelo (75%) -> Vermelho (95-100%)
+  if (!validSteps || validSteps.length === 0) {
+    return `linear-gradient(90deg, ${effectiveBase} 0%, ${effectiveBase} 55%, #EAB839 75%, #F2495C 95%, #F2495C 100%)`;
+  }
+
+  // Caso 2: Modo decrescente (lte, <=) -> ex: Bateria / Espaço Livre (0% é Crítico/Vermelho, 100% é Saudável/Verde)
+  if (comparisonMode === 'lte') {
+    const sortedLte = [...validSteps].sort((a, b) => Number(a.value) - Number(b.value));
+    const stops: string[] = [];
+
+    // O menor threshold é o mais crítico (ex: <= 10% vermelho, <= 20% amarelo)
+    sortedLte.forEach((st, idx) => {
+      const posPct = Math.max(0, Math.min(100, ((Number(st.value) - rangeMin) / rangeSpan) * 100));
+      const col = resolveAlertHexColor(st.color);
+      if (idx === 0) {
+        stops.push(`${col} 0%`);
+        stops.push(`${col} ${Math.max(0, posPct - 3).toFixed(1)}%`);
+      }
+      stops.push(`${col} ${posPct.toFixed(1)}%`);
+    });
+
+    stops.push(`${effectiveBase} ${Math.min(100, Math.max(0, ((Number(sortedLte[sortedLte.length - 1].value) - rangeMin) / rangeSpan) * 100) + 5).toFixed(1)}%`);
+    stops.push(`${effectiveBase} 100%`);
+
+    return `linear-gradient(90deg, ${stops.join(', ')})`;
+  }
+
+  // Caso 3: Modo crescente padrão (gte / eq) -> Começa no verde padrão e escala até vermelho
+  const baseStep = thresholds?.steps?.find((s) => s.value === null || s.value === -Infinity);
+  const startColor = baseStep?.color ? resolveAlertHexColor(baseStep.color, effectiveBase) : effectiveBase;
+
+  const sortedGte = [...validSteps].sort((a, b) => Number(a.value) - Number(b.value));
+
+  const stops: string[] = [];
+  stops.push(`${startColor} 0%`);
+
+  sortedGte.forEach((st, idx) => {
+    const posPct = Math.max(0, Math.min(100, ((Number(st.value) - rangeMin) / rangeSpan) * 100));
+    const col = resolveAlertHexColor(st.color);
+
+    const prevColor = idx === 0 ? startColor : resolveAlertHexColor(sortedGte[idx - 1].color);
+    const blendStart = Math.max(0, posPct - 6);
+
+    stops.push(`${prevColor} ${blendStart.toFixed(1)}%`);
+    stops.push(`${col} ${posPct.toFixed(1)}%`);
+  });
+
+  const lastColor = resolveAlertHexColor(sortedGte[sortedGte.length - 1].color);
+  stops.push(`${lastColor} 100%`);
+
+  return `linear-gradient(90deg, ${stops.join(', ')})`;
+}
+
 export interface ProgressBarRendererProps {
   value: number | null;
   min?: number | null;
   max?: number | null;
   color?: string; // Cor do threshold se usar threshold
   useThreshold?: boolean;
+  thresholds?: NativeThresholdsConfig;
+  comparisonMode?: ThresholdComparisonMode;
   formattedValue?: string;
   showValueText?: boolean;
   height?: ProgressHeight | number;
@@ -355,6 +431,8 @@ export const ProgressBarRenderer: React.FC<ProgressBarRendererProps> = ({
   max = 100,
   color,
   useThreshold = false,
+  thresholds,
+  comparisonMode = 'gte',
   formattedValue,
   showValueText = true,
   height = '6px',
@@ -370,12 +448,17 @@ export const ProgressBarRenderer: React.FC<ProgressBarRendererProps> = ({
 
   const barHeight = typeof height === 'number' ? height : (height === '12px' ? 12 : height === '8px' ? 8 : 6);
 
-  // Se usar threshold, pinte com a cor da faixa; se não, pinte com gradiente da cor padrão
-  const fillBg = (useThreshold && color)
-    ? color
+  // Gradiente inteligente: se usar threshold, mapeia a escala inteira da barra de verde -> amarelo -> vermelho
+  const fillGradient = useThreshold
+    ? buildProgressBarGradient(rangeMin, rangeMax, thresholds, comparisonMode, defaultColor)
     : `linear-gradient(90deg, ${parseColorToRgba(defaultColor, 0.70)} 0%, ${defaultColor} 100%)`;
 
-  const shadowColor = (useThreshold && color) ? color : defaultColor;
+  const thrRes = useThreshold && thresholds
+    ? resolveColumnThreshold(numVal, thresholds, comparisonMode)
+    : undefined;
+  const tipColor = (useThreshold && thrRes?.isViolation)
+    ? thrRes.color
+    : (color || defaultColor || '#10b981');
 
   return (
     <div
@@ -403,9 +486,12 @@ export const ProgressBarRenderer: React.FC<ProgressBarRendererProps> = ({
           style={{
             width: `${percentage.toFixed(1)}%`,
             height: '100%',
-            background: fillBg,
+            backgroundImage: fillGradient,
+            backgroundSize: (useThreshold && percentage > 0) ? `${(100 / percentage) * 100}% 100%` : '100% 100%',
+            backgroundPosition: 'left center',
+            backgroundRepeat: 'no-repeat',
             borderRadius: Math.round(barHeight / 2),
-            boxShadow: `0 0 6px ${parseColorToRgba(shadowColor, 0.35)}`,
+            boxShadow: `0 0 6px ${parseColorToRgba(tipColor, 0.45)}`,
             transition: 'width 0.25s ease',
           }}
         />
@@ -415,7 +501,7 @@ export const ProgressBarRenderer: React.FC<ProgressBarRendererProps> = ({
           style={{
             fontSize: barHeight >= 12 ? 11.5 : 10.5,
             fontWeight: 500,
-            color: (useThreshold && color) ? color : 'rgba(255, 255, 255, 0.72)',
+            color: (useThreshold && thrRes?.isViolation) ? thrRes.color : 'rgba(255, 255, 255, 0.72)',
             fontVariantNumeric: 'tabular-nums',
             minWidth: 32,
             textAlign: 'right',
@@ -435,18 +521,15 @@ export interface SegmentedBarRendererProps {
   min?: number | null;
   max?: number | null;
   color?: string; // Cor do threshold se ativo
+  useThreshold?: boolean;
+  thresholds?: NativeThresholdsConfig;
+  comparisonMode?: ThresholdComparisonMode;
   isActiveThreshold?: boolean;
   formattedValue?: string;
   showValueText?: boolean;
   blockCount?: number;
+  defaultColor?: string;
   style?: React.CSSProperties;
-}
-
-function getVuBarColor(index: number): string {
-  // Gradiente/interpolação clássica VU meter: verde (0-5) -> amarelo/âmbar (6-7) -> vermelho (8-9)
-  if (index <= 5) return '#4ade80';
-  if (index <= 7) return '#FF9830';
-  return '#F2495C';
 }
 
 export const SegmentedBarRenderer: React.FC<SegmentedBarRendererProps> = ({
@@ -454,10 +537,14 @@ export const SegmentedBarRenderer: React.FC<SegmentedBarRendererProps> = ({
   min = 0,
   max = 100,
   color,
+  useThreshold = false,
+  thresholds,
+  comparisonMode = 'gte',
   isActiveThreshold = false,
   formattedValue,
   showValueText = true,
   blockCount = 10,
+  defaultColor = '#00B59B',
   style,
 }) => {
   const numVal = value !== null && !isNaN(Number(value)) ? Number(value) : 0;
@@ -467,6 +554,13 @@ export const SegmentedBarRenderer: React.FC<SegmentedBarRendererProps> = ({
   // Calcule a taxa do valor ((val - min) / (max - min) * blockCount)
   const rate = ((numVal - rangeMin) / (rangeMax - rangeMin)) * blockCount;
   const litCount = Math.min(blockCount, Math.max(0, Math.round(rate)));
+
+  const currentThr = useThreshold && thresholds
+    ? resolveColumnThreshold(numVal, thresholds, comparisonMode)
+    : undefined;
+  const textColor = (useThreshold && currentThr?.isViolation)
+    ? currentThr.color
+    : (isActiveThreshold && color ? color : 'rgba(255, 255, 255, 0.72)');
 
   return (
     <div
@@ -486,10 +580,26 @@ export const SegmentedBarRenderer: React.FC<SegmentedBarRendererProps> = ({
       >
         {Array.from({ length: blockCount }, (_, i) => {
           const isLit = i < litCount;
-          // Se ativo por threshold: cor do threshold; senão interpolando de verde a vermelho
-          const litColor = (isActiveThreshold && color) ? color : (color || getVuBarColor(i));
-          const barBg = isLit ? litColor : 'rgba(255, 255, 255, 0.05)';
-          const boxShadow = isLit ? `0 0 3px ${parseColorToRgba(litColor, 0.45)}` : 'none';
+          const segVal = rangeMin + ((i + 0.5) / blockCount) * (rangeMax - rangeMin);
+
+          // Gradiente inteligente por bloco: cada segmento assume a cor da faixa em que está posicionado
+          let blockColor = defaultColor || '#00B59B';
+          if (useThreshold) {
+            if (thresholds?.steps && thresholds.steps.some((st) => st.value !== null)) {
+              const res = resolveColumnThreshold(segVal, thresholds, comparisonMode);
+              blockColor = res.isViolation
+                ? res.color
+                : resolveAlertHexColor(res.baseStep?.color, defaultColor || '#10b981');
+            } else {
+              // Gradiente inteligente clássico quando não há thresholds manuais configurados
+              blockColor = i <= 5 ? (defaultColor || '#10b981') : i <= 7 ? '#EAB839' : '#F2495C';
+            }
+          } else if (isActiveThreshold && color) {
+            blockColor = color;
+          }
+
+          const barBg = isLit ? blockColor : 'rgba(255, 255, 255, 0.05)';
+          const boxShadow = isLit ? `0 0 3px ${parseColorToRgba(blockColor, 0.45)}` : 'none';
 
           return (
             <div
@@ -511,7 +621,7 @@ export const SegmentedBarRenderer: React.FC<SegmentedBarRendererProps> = ({
           style={{
             fontSize: 10.5,
             fontWeight: 500,
-            color: (isActiveThreshold && color) ? color : 'rgba(255, 255, 255, 0.72)',
+            color: textColor,
             fontVariantNumeric: 'tabular-nums',
             minWidth: 28,
             textAlign: 'right',
@@ -529,66 +639,258 @@ export const SegmentedBarRenderer: React.FC<SegmentedBarRendererProps> = ({
 // ── 4. Estilo DeltaTrend ─────────────────────────────────────────────────────
 export interface DeltaTrendRendererProps {
   current: number | null;
-  periodAvg: number | null;
+  values?: any[];
+  periodAvg?: number | null;
   formattedCurrent?: string;
   formattedDelta?: string;
+  showDeltaValue?: boolean;
+  thresholds?: NativeThresholdsConfig;
   thresholdColor?: string;
   isActiveThreshold?: boolean;
+  isApproachingThreshold?: boolean;
+  deltaReferenceMode?: 'mean' | 'first' | 'prev';
+  deltaValueFormat?: DeltaValueFormat;
+  deltaDeadbandPct?: number;
+  deltaProximityPct?: number;
+  deltaComparisonDirection?: ThresholdComparisonMode;
+  deltaHighlightRelief?: boolean;
+  useThresholdColors?: boolean;
+  colorMode?: 'proximity' | 'direction' | 'threshold' | 'neutral';
   style?: React.CSSProperties;
 }
 
 export const DeltaTrendRenderer: React.FC<DeltaTrendRendererProps> = ({
   current,
+  values,
   periodAvg,
   formattedCurrent,
   formattedDelta,
+  showDeltaValue = true,
+  thresholds,
   thresholdColor,
   isActiveThreshold = false,
+  isApproachingThreshold = false,
+  deltaReferenceMode = 'mean',
+  deltaValueFormat = 'percent',
+  deltaDeadbandPct = 1,
+  deltaProximityPct = 20,
+  deltaComparisonDirection = 'gte',
+  deltaHighlightRelief = true,
+  useThresholdColors = true,
+  colorMode = 'proximity',
   style,
 }) => {
   const cur = current !== null && !isNaN(Number(current)) ? Number(current) : null;
-  const avg = periodAvg !== null && !isNaN(Number(periodAvg)) ? Number(periodAvg) : null;
+  const refMode = deltaReferenceMode || 'mean';
 
-  const delta = cur !== null && avg !== null ? cur - avg : 0;
-  const absDelta = Math.abs(delta);
-
-  let pillText = '● 0';
-  let pillColor = (isActiveThreshold && thresholdColor) ? thresholdColor : 'rgba(255, 255, 255, 0.45)';
-  let pillBg = (isActiveThreshold && thresholdColor) ? parseColorToRgba(thresholdColor, 0.12) : 'rgba(255, 255, 255, 0.04)';
-  let pillBorder = (isActiveThreshold && thresholdColor) ? `1px solid ${parseColorToRgba(thresholdColor, 0.30)}` : '1px solid rgba(255, 255, 255, 0.08)';
-
-  if (cur === null || avg === null || absDelta < 1e-5) {
-    pillText = '● 0';
-  } else if (delta > 0) {
-    const disp = formattedDelta || absDelta.toFixed(1);
-    pillText = `▲ +${disp}`;
-    const clr = (isActiveThreshold && thresholdColor) ? thresholdColor : 'rgba(255, 255, 255, 0.65)';
-    pillColor = clr;
-    pillBg = (isActiveThreshold && thresholdColor) ? parseColorToRgba(clr, 0.12) : 'rgba(255, 255, 255, 0.05)';
-    pillBorder = (isActiveThreshold && thresholdColor) ? `1px solid ${parseColorToRgba(clr, 0.30)}` : '1px solid rgba(255, 255, 255, 0.10)';
+  // 1. Cálculo de Referência e Deadband
+  let refVal: number | null = null;
+  if (refMode === 'first') {
+    const valid = (values || []).filter((v) => typeof v === 'number' && !isNaN(v));
+    refVal = valid.length > 0 ? valid[0] : (periodAvg !== null && periodAvg !== undefined ? Number(periodAvg) : cur);
+  } else if (refMode === 'prev') {
+    const valid = (values || []).filter((v) => typeof v === 'number' && !isNaN(v));
+    refVal = valid.length > 1 ? valid[valid.length - 2] : (valid[0] ?? (periodAvg !== null && periodAvg !== undefined ? Number(periodAvg) : cur));
   } else {
-    const disp = formattedDelta || absDelta.toFixed(1);
-    pillText = `▼ -${disp}`;
-    const clr = (isActiveThreshold && thresholdColor) ? thresholdColor : 'rgba(255, 255, 255, 0.65)';
-    pillColor = clr;
-    pillBg = (isActiveThreshold && thresholdColor) ? parseColorToRgba(clr, 0.12) : 'rgba(255, 255, 255, 0.05)';
-    pillBorder = (isActiveThreshold && thresholdColor) ? `1px solid ${parseColorToRgba(clr, 0.30)}` : '1px solid rgba(255, 255, 255, 0.10)';
+    // 'mean' (Padrão)
+    if (periodAvg !== null && periodAvg !== undefined && !isNaN(Number(periodAvg))) {
+      refVal = Number(periodAvg);
+    } else {
+      const valid = (values || []).filter((v) => typeof v === 'number' && !isNaN(v));
+      refVal = valid.length > 0 ? valid.reduce((a, b) => a + b, 0) / valid.length : cur;
+    }
   }
 
-  const currentValueColor = (isActiveThreshold && thresholdColor) ? thresholdColor : 'rgba(255, 255, 255, 0.72)';
+  const rawDelta = cur !== null && refVal !== null ? cur - refVal : 0;
+  const pctDelta = refVal !== null && refVal !== 0 ? (rawDelta / Math.abs(refVal)) * 100 : 0;
+
+  const deadbandLimit = deltaDeadbandPct ?? 1;
+  const isStable = Math.abs(pctDelta) < deadbandLimit || cur === null || refVal === null;
+
+  // Formatação do delta exibido no badge conforme deltaValueFormat ('percent' | 'absolute' | 'both')
+  const dispAbs = formattedDelta || Math.abs(rawDelta).toFixed(1);
+  const dispPct = `${Math.abs(pctDelta).toFixed(1)}%`;
+  let valDisp = dispPct;
+  if (deltaValueFormat === 'absolute') {
+    valDisp = dispAbs;
+  } else if (deltaValueFormat === 'both') {
+    valDisp = `${dispAbs} (${dispPct})`;
+  } else {
+    // 'percent' (padrão)
+    valDisp = dispPct;
+  }
+
+  // Texto da Pílula (Badge de Tendência)
+  let badgeText = '● 0%';
+  if (isStable) {
+    badgeText = showDeltaValue === false ? '●' : (deltaValueFormat === 'absolute' ? '● 0' : '● 0%');
+  } else if (rawDelta > 0) {
+    badgeText = showDeltaValue === false ? '▲' : `▲ +${valDisp}`;
+  } else {
+    badgeText = showDeltaValue === false ? '▼' : `▼ -${valDisp}`;
+  }
+
+  // 2. Cálculo da Zona de Proximidade (20%)
+  const compDir: ThresholdComparisonMode = deltaComparisonDirection || 'gte';
+  const proxRatio = (deltaProximityPct ?? 20) / 100;
+
+  // Encontra firstThreshold (ignorando -Infinity / null / NaN)
+  const finiteSteps = (thresholds?.steps || []).filter(
+    (s) =>
+      s.value !== null &&
+      s.value !== undefined &&
+      (s.value as any) !== '' &&
+      Number(s.value) !== -Infinity &&
+      !isNaN(Number(s.value))
+  );
+
+  let firstThreshold: ThresholdStep | undefined;
+  if (finiteSteps.length > 0) {
+    if (compDir === 'lte') {
+      const sortedLte = [...finiteSteps].sort((a, b) => Number(b.value) - Number(a.value));
+      firstThreshold = sortedLte[0];
+    } else {
+      const sortedGte = [...finiteSteps].sort((a, b) => Number(a.value) - Number(b.value));
+      firstThreshold = sortedGte[0];
+    }
+  }
+
+  let inProximity = false;
+  if (firstThreshold && cur !== null) {
+    const fVal = Number(firstThreshold.value);
+    if (compDir === 'gte') {
+      const proximityLimit = fVal !== 0 ? fVal - Math.abs(fVal) * proxRatio : -proxRatio;
+      inProximity = cur >= proximityLimit && cur < fVal;
+    } else if (compDir === 'lte') {
+      const proximityLimit = fVal !== 0 ? fVal + Math.abs(fVal) * proxRatio : proxRatio;
+      inProximity = cur > fVal && cur <= proximityLimit;
+    }
+  }
+
+  // Avaliação de violação de threshold
+  const thrRes = (thresholds && cur !== null)
+    ? resolveColumnThreshold(cur, thresholds, compDir)
+    : undefined;
+  const isViolating = Boolean(thrRes?.isViolation || isActiveThreshold);
+  const activeThrColor = resolveAlertHexColor(thrRes?.color || thresholdColor || '#F2495C');
+  const firstThrColor = firstThreshold?.color ? resolveAlertHexColor(firstThreshold.color) : '#EAB839';
+
+  // 3. Matriz de Coloração Independente (Apenas se useThresholdColors !== false)
+  const neutralText = '#f8fafc';
+  const neutralBadgeText = 'rgba(248, 250, 252, 0.65)';
+  const neutralBadgeBg = 'rgba(255, 255, 255, 0.05)';
+  const neutralBadgeBorder = '1px solid rgba(255, 255, 255, 0.10)';
+
+  let textColor = neutralText;
+  let badgeColor = neutralBadgeText;
+  let badgeBg = neutralBadgeBg;
+  let badgeBorder = neutralBadgeBorder;
+
+  if (useThresholdColors !== false) {
+    if (isViolating) {
+      // Cenários 4 e 5: Violou limiar de threshold (Texto assume a cor do threshold)
+      textColor = activeThrColor;
+
+      const isWorsening = (compDir === 'gte' && rawDelta > 0) || (compDir === 'lte' && rawDelta < 0);
+      const isRetreating = (compDir === 'gte' && rawDelta < 0) || (compDir === 'lte' && rawDelta > 0);
+
+      if (isStable) {
+        // Estável no threshold violado (deadband): Badge Neutro Discreto
+        badgeColor = neutralBadgeText;
+        badgeBg = neutralBadgeBg;
+        badgeBorder = neutralBadgeBorder;
+      } else if (isWorsening) {
+        // Cenário 4 (No Threshold Agravando): Violou limiar e continua piorando
+        badgeColor = activeThrColor;
+        badgeBg = parseColorToRgba(activeThrColor, 0.28);
+        badgeBorder = `1px solid ${parseColorToRgba(activeThrColor, 0.50)}`;
+      } else if (isRetreating) {
+        // Cenário 5 (No Threshold Recuperando): Violou limiar, mas recuando
+        if (deltaHighlightRelief !== false) {
+          const recoveryGreen = '#4ade80';
+          badgeColor = recoveryGreen;
+          badgeBg = parseColorToRgba(recoveryGreen, 0.18);
+          badgeBorder = `1px solid ${parseColorToRgba(recoveryGreen, 0.35)}`;
+        } else {
+          badgeColor = neutralBadgeText;
+          badgeBg = neutralBadgeBg;
+          badgeBorder = neutralBadgeBorder;
+        }
+      }
+    } else if (inProximity) {
+      // Cenários 2 e 3: Na proximidade (20%), sem violar (Texto permanece neutro #f8fafc)
+      textColor = neutralText;
+
+      const isApproaching = (compDir === 'gte' && rawDelta > 0) || (compDir === 'lte' && rawDelta < 0);
+      const isRelieving = (compDir === 'gte' && rawDelta < 0) || (compDir === 'lte' && rawDelta > 0);
+
+      if (isStable) {
+        // Estável na zona de proximidade (deadband): Badge Neutro Discreto
+        badgeColor = neutralBadgeText;
+        badgeBg = neutralBadgeBg;
+        badgeBorder = neutralBadgeBorder;
+      } else if (isApproaching) {
+        // Cenário 2 (Proximidade Agravando): Indo para o limiar (Alerta Preventivo)
+        badgeColor = firstThrColor;
+        badgeBg = parseColorToRgba(firstThrColor, 0.18);
+        badgeBorder = `1px solid ${parseColorToRgba(firstThrColor, 0.35)}`;
+      } else if (isRelieving) {
+        // Cenário 3 (Proximidade Aliviando): Afastando do limiar
+        if (deltaHighlightRelief) {
+          const softGreen = '#4ade80';
+          badgeColor = softGreen;
+          badgeBg = parseColorToRgba(softGreen, 0.15);
+          badgeBorder = `1px solid ${parseColorToRgba(softGreen, 0.30)}`;
+        } else {
+          badgeColor = neutralBadgeText;
+          badgeBg = neutralBadgeBg;
+          badgeBorder = neutralBadgeBorder;
+        }
+      }
+    } else {
+      // Cenário 1 (Seguro): Fora de proximidade e sem violar
+      textColor = neutralText;
+      badgeColor = neutralBadgeText;
+      badgeBg = neutralBadgeBg;
+      badgeBorder = neutralBadgeBorder;
+    }
+  } else {
+    // useThresholdColors === false
+    if (colorMode === 'direction') {
+      if (rawDelta > 0) {
+        const upColor = '#F2495C';
+        badgeColor = upColor;
+        badgeBg = parseColorToRgba(upColor, 0.14);
+        badgeBorder = `1px solid ${parseColorToRgba(upColor, 0.30)}`;
+      } else if (rawDelta < 0) {
+        const downColor = '#4ade80';
+        badgeColor = downColor;
+        badgeBg = parseColorToRgba(downColor, 0.14);
+        badgeBorder = `1px solid ${parseColorToRgba(downColor, 0.30)}`;
+      }
+    }
+  }
 
   return (
     <div
       style={{
         display: 'inline-flex',
         alignItems: 'center',
-        gap: 5,
+        gap: 6,
         fontVariantNumeric: 'tabular-nums',
         ...style,
       }}
     >
       {formattedCurrent && (
-        <span style={{ fontWeight: 500, color: currentValueColor, fontSize: '11.5px' }}>
+        <span
+          style={{
+            fontWeight: 500,
+            color: textColor,
+            fontSize: '11.5px',
+            lineHeight: '14px',
+            fontVariantNumeric: 'tabular-nums',
+          }}
+        >
           {formattedCurrent}
         </span>
       )}
@@ -601,14 +903,16 @@ export const DeltaTrendRenderer: React.FC<DeltaTrendRendererProps> = ({
           borderRadius: 9999,
           fontSize: '9.5px',
           fontWeight: 500,
-          backgroundColor: pillBg,
-          border: pillBorder,
-          color: pillColor,
+          backgroundColor: badgeBg,
+          border: badgeBorder,
+          color: badgeColor,
           whiteSpace: 'nowrap',
           lineHeight: '13px',
+          fontVariantNumeric: 'tabular-nums',
+          transition: 'background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease',
         }}
       >
-        {pillText}
+        {badgeText}
       </span>
     </div>
   );
@@ -1122,14 +1426,21 @@ export interface TimeSeriesRendererProps {
   tStart: number;
   tEnd: number;
   lineColor?: string;
+  normalLineColor?: string;
+  thresholds?: NativeThresholdsConfig;
   lineWidth?: number;
-  areaOpacity?: number; // 0..100
+  lineOpacity?: number; // 10..100 (%)
+  areaOpacity?: number; // 0..100 (%)
   lineInterpolation?: 'smooth' | 'straight' | 'stepBefore' | 'stepAfter';
   disconnectThreshold?: DisconnectThresholdMode;
   height?: number;
   formatValue?: (val: number) => string;
   columnKey?: string;
   style?: React.CSSProperties;
+  binaryStepHighlight?: boolean;
+  episodes?: AlertEpisode[];
+  violationColor?: string;
+  thresholdComparisonMode?: ThresholdComparisonMode;
 }
 
 export const TimeSeriesRenderer: React.FC<TimeSeriesRendererProps> = ({
@@ -1138,7 +1449,10 @@ export const TimeSeriesRenderer: React.FC<TimeSeriesRendererProps> = ({
   tStart,
   tEnd,
   lineColor = '#00B59B',
+  normalLineColor,
+  thresholds,
   lineWidth = 1.5,
+  lineOpacity = 100,
   areaOpacity = 25,
   lineInterpolation = 'smooth',
   disconnectThreshold = 'auto',
@@ -1146,6 +1460,10 @@ export const TimeSeriesRenderer: React.FC<TimeSeriesRendererProps> = ({
   formatValue,
   columnKey,
   style,
+  binaryStepHighlight = false,
+  episodes = [],
+  violationColor,
+  thresholdComparisonMode,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1229,15 +1547,45 @@ export const TimeSeriesRenderer: React.FC<TimeSeriesRendererProps> = ({
     );
     const maxGapMs = resolveDisconnectThresholdMs(typicalStepMs, disconnectThreshold);
 
-    const numVals = validPairs.map((p) => p.v);
-    let minVal = Math.min(...numVals);
-    let maxVal = Math.max(...numVals);
-    if (minVal === maxVal) {
-      minVal -= 1;
-      maxVal += 1;
-    }
-    const valRange = maxVal - minVal || 1;
     const timeSpan = Math.max(1, tEnd - tStart);
+
+    const numVals = validPairs.map((p) => p.v);
+    const hasOnly0and1 =
+      numVals.length > 0 &&
+      numVals.every((v) => v === 0 || v === 1 || Math.abs(v) < 1e-4 || Math.abs(v - 1) < 1e-4);
+
+    const isBinary =
+      Boolean(binaryStepHighlight) ||
+      thresholdComparisonMode === 'eq' ||
+      hasOnly0and1;
+
+    // Se for binário (ex: Ping / UP-DOWN), trava rigidamente a escala Y em [0, 1]
+    // com amplitude vertical máxima na célula:
+    // UP (1) fica sempre no TOPO (py = 1.5px)
+    // DOWN (0) fica sempre na BASE (py = height) para nunca gerar gradiente abaixo ou acima de 0
+    const calcPy = (v: number) => {
+      if (isBinary) {
+        const clamped = Math.max(0, Math.min(1, v));
+        return height - clamped * (height - 2);
+      }
+      let minVal = Math.min(...numVals);
+      let maxVal = Math.max(...numVals);
+      if (minVal === maxVal) {
+        if (minVal === 0) {
+          minVal = 0;
+          maxVal = 1;
+        } else {
+          minVal = minVal > 0 ? minVal * 0.9 : minVal - 1;
+          maxVal = maxVal > 0 ? maxVal * 1.1 : maxVal + 1;
+        }
+      }
+      const valRange = maxVal - minVal || 1;
+      const normY = Math.max(0, Math.min(1, (v - minVal) / valRange));
+      return height - normY * (height - 3);
+    };
+
+    // Interpolação efetiva: para binário, FORÇA degrau reto 90° ('stepBefore') para queda/subida estritamente vertical
+    const effectiveInterpolation = isBinary ? 'stepBefore' : lineInterpolation;
 
     // Divide em segmentos contínuos respeitando limites de desconexão (gaps)
     const segments: Array<Array<{ x: number; y: number; t: number; v: number }>> = [];
@@ -1254,8 +1602,7 @@ export const TimeSeriesRenderer: React.FC<TimeSeriesRendererProps> = ({
 
       const normX = Math.max(0, Math.min(1, (pt.t - tStart) / timeSpan));
       const px = normX * containerWidth;
-      const normY = Math.max(0, Math.min(1, (pt.v - minVal) / valRange));
-      const py = height - 2 - normY * (height - 5);
+      const py = calcPy(pt.v);
 
       curSegment.push({ x: px, y: py, t: pt.t, v: pt.v });
     }
@@ -1263,20 +1610,111 @@ export const TimeSeriesRenderer: React.FC<TimeSeriesRendererProps> = ({
       segments.push(curSegment);
     }
 
+    const fallbackHealthyColor = '#10b981';
+    const effectiveNormalColor = normalLineColor || lineColor || fallbackHealthyColor;
+
+    const getPointColor = (v: number, t: number): string => {
+      // 1. Avalia thresholds nativos configurados
+      if (thresholds?.steps && thresholds.steps.length > 0) {
+        const res = resolveColumnThreshold(v, thresholds, thresholdComparisonMode, undefined, effectiveNormalColor);
+        if (res.isViolation) {
+          return res.color;
+        }
+      }
+
+      // 2. Avalia episódios de alerta
+      if (episodes && episodes.length > 0) {
+        const ep = episodes.find((e) => t >= e.startTs && t <= e.endTs);
+        if (ep) {
+          return ep.color || violationColor || '#F2495C';
+        }
+      }
+
+      // 3. Para métricas binárias (0 = Down / Alerta, 1 = Up / Normal)
+      if (isBinary && Math.abs(v) < 1e-4) {
+        return violationColor || '#F2495C';
+      }
+
+      // 4. Cor normal saudável
+      return effectiveNormalColor;
+    };
+
     // Desenha cada segmento
     segments.forEach((seg) => {
       if (seg.length === 0) {
         return;
       }
 
-      // 1. Área preenchida com gradiente sutil
-      if (areaOpacity > 0 && seg.length > 1) {
-        ctx.beginPath();
-        ctx.moveTo(seg[0].x, height);
-        ctx.lineTo(seg[0].x, seg[0].y);
+      // Associa a cor correspondente (threshold vs normal) a cada ponto
+      const coloredSeg = seg.map((pt) => ({
+        ...pt,
+        color: getPointColor(pt.v, pt.t),
+      }));
 
-        if (lineInterpolation === 'straight') {
+      const isMultiColor = coloredSeg.some((pt) => pt.color !== coloredSeg[0].color);
+      const fillAlpha = Math.min(1.0, Math.max(0, (areaOpacity ?? 25) / 100));
+
+      // Caso 1: Monocromático (todos os pontos têm a mesma cor)
+      if (!isMultiColor) {
+        const segColor = coloredSeg[0].color;
+        const solidColor = parseColorToRgba(segColor, 1.0);
+
+        if (fillAlpha > 0 && seg.length > 1) {
+          ctx.beginPath();
+          ctx.moveTo(seg[0].x, height);
+          ctx.lineTo(seg[0].x, seg[0].y);
+
+          if (effectiveInterpolation === 'straight') {
+            for (let i = 1; i < seg.length; i++) {
+              ctx.lineTo(seg[i].x, seg[i].y);
+            }
+          } else if (effectiveInterpolation === 'stepBefore') {
+            for (let i = 1; i < seg.length; i++) {
+              ctx.lineTo(seg[i].x, seg[i - 1].y);
+              ctx.lineTo(seg[i].x, seg[i].y);
+            }
+          } else if (effectiveInterpolation === 'stepAfter') {
+            for (let i = 1; i < seg.length; i++) {
+              ctx.lineTo(seg[i - 1].x, seg[i].y);
+              ctx.lineTo(seg[i].x, seg[i].y);
+            }
+          } else {
+            for (let i = 0; i < seg.length - 1; i++) {
+              const p0 = seg[i];
+              const p1 = seg[i + 1];
+              const mx = (p0.x + p1.x) / 2;
+              ctx.quadraticCurveTo(p0.x, p0.y, mx, (p0.y + p1.y) / 2);
+            }
+            ctx.lineTo(seg[seg.length - 1].x, seg[seg.length - 1].y);
+          }
+
+          ctx.lineTo(seg[seg.length - 1].x, height);
+          ctx.closePath();
+
+          const grad = ctx.createLinearGradient(0, 0, 0, height);
+          grad.addColorStop(0, parseColorToRgba(segColor, fillAlpha));
+          grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+          ctx.fillStyle = grad;
+          ctx.fill();
+        }
+
+        ctx.beginPath();
+        ctx.moveTo(seg[0].x, seg[0].y);
+
+        if (seg.length === 1) {
+          ctx.arc(seg[0].x, seg[0].y, 1.5, 0, Math.PI * 2);
+        } else if (effectiveInterpolation === 'straight') {
           for (let i = 1; i < seg.length; i++) {
+            ctx.lineTo(seg[i].x, seg[i].y);
+          }
+        } else if (effectiveInterpolation === 'stepBefore') {
+          for (let i = 1; i < seg.length; i++) {
+            ctx.lineTo(seg[i].x, seg[i - 1].y);
+            ctx.lineTo(seg[i].x, seg[i].y);
+          }
+        } else if (effectiveInterpolation === 'stepAfter') {
+          for (let i = 1; i < seg.length; i++) {
+            ctx.lineTo(seg[i - 1].x, seg[i].y);
             ctx.lineTo(seg[i].x, seg[i].y);
           }
         } else {
@@ -1289,52 +1727,161 @@ export const TimeSeriesRenderer: React.FC<TimeSeriesRendererProps> = ({
           ctx.lineTo(seg[seg.length - 1].x, seg[seg.length - 1].y);
         }
 
-        ctx.lineTo(seg[seg.length - 1].x, height);
-        ctx.closePath();
-
-        const grad = ctx.createLinearGradient(0, 0, 0, height);
-        const topAlpha = Math.min(0.8, (areaOpacity / 100) * 0.6);
-        grad.addColorStop(0, parseColorToRgba(lineColor, topAlpha));
-        grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-        ctx.fillStyle = grad;
-        ctx.fill();
+        ctx.strokeStyle = solidColor;
+        ctx.lineWidth = lineWidth;
+        ctx.lineCap = isBinary ? 'square' : 'round';
+        ctx.lineJoin = isBinary ? 'miter' : 'round';
+        ctx.stroke();
+        return;
       }
 
-      // 2. Traçado da linha
-      ctx.beginPath();
-      ctx.moveTo(seg[0].x, seg[0].y);
+      // Caso 2: MULTICOR (Partes diferentes da linha têm cores diferentes de threshold/normal)
+      if (effectiveInterpolation === 'stepBefore') {
+        // --- 2.A: STEPBEFORE (Degrau Reto / Binário / UP-DOWN) ---
+        for (let i = 0; i < coloredSeg.length - 1; i++) {
+          const p0 = coloredSeg[i];
+          const p1 = coloredSeg[i + 1];
+          const c0 = p0.color;
+          const c1 = p1.color;
 
-      if (seg.length === 1) {
-        ctx.arc(seg[0].x, seg[0].y, 1.5, 0, Math.PI * 2);
-      } else if (lineInterpolation === 'straight') {
-        for (let i = 1; i < seg.length; i++) {
-          ctx.lineTo(seg[i].x, seg[i].y);
+          // Área sob o patamar horizontal [p0.x -> p1.x] na altura p0.y
+          if (fillAlpha > 0) {
+            ctx.beginPath();
+            ctx.moveTo(p0.x, height);
+            ctx.lineTo(p0.x, p0.y);
+            ctx.lineTo(p1.x, p0.y);
+            ctx.lineTo(p1.x, height);
+            ctx.closePath();
+
+            const segGrad = ctx.createLinearGradient(0, 0, 0, height);
+            segGrad.addColorStop(0, parseColorToRgba(c0, fillAlpha));
+            segGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            ctx.fillStyle = segGrad;
+            ctx.fill();
+          }
+
+          // Linha Horizontal no valor p0.y com a cor c0
+          ctx.beginPath();
+          ctx.moveTo(p0.x, p0.y);
+          ctx.lineTo(p1.x, p0.y);
+          ctx.strokeStyle = parseColorToRgba(c0, 1.0);
+          ctx.lineWidth = lineWidth;
+          ctx.lineCap = 'square';
+          ctx.lineJoin = 'miter';
+          ctx.stroke();
+
+          // Degrau Vertical no instante p1.x conectando p0.y -> p1.y
+          if (Math.abs(p0.y - p1.y) > 0.5) {
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p0.y);
+            ctx.lineTo(p1.x, p1.y);
+            if (c0 === c1) {
+              ctx.strokeStyle = parseColorToRgba(c0, 1.0);
+            } else {
+              const vGrad = ctx.createLinearGradient(p1.x, p0.y, p1.x, p1.y);
+              vGrad.addColorStop(0, parseColorToRgba(c0, 1.0));
+              vGrad.addColorStop(1, parseColorToRgba(c1, 1.0));
+              ctx.strokeStyle = vGrad;
+            }
+            ctx.lineWidth = lineWidth;
+            ctx.lineCap = 'square';
+            ctx.lineJoin = 'miter';
+            ctx.stroke();
+          }
         }
       } else {
-        for (let i = 0; i < seg.length - 1; i++) {
-          const p0 = seg[i];
-          const p1 = seg[i + 1];
+        // --- 2.B: CURVA CONTÍNUA (Straight ou Smooth) ---
+        for (let i = 0; i < coloredSeg.length - 1; i++) {
+          const p0 = coloredSeg[i];
+          const p1 = coloredSeg[i + 1];
+          const c0 = p0.color;
+          const c1 = p1.color;
           const mx = (p0.x + p1.x) / 2;
-          ctx.quadraticCurveTo(p0.x, p0.y, mx, (p0.y + p1.y) / 2);
-        }
-        ctx.lineTo(seg[seg.length - 1].x, seg[seg.length - 1].y);
-      }
+          const my = (p0.y + p1.y) / 2;
 
-      ctx.strokeStyle = lineColor;
-      ctx.lineWidth = lineWidth;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.stroke();
+          // Área sob a curva
+          if (fillAlpha > 0) {
+            if (c0 === c1) {
+              ctx.beginPath();
+              ctx.moveTo(p0.x, height);
+              ctx.lineTo(p0.x, p0.y);
+              if (effectiveInterpolation === 'straight') {
+                ctx.lineTo(p1.x, p1.y);
+              } else {
+                ctx.quadraticCurveTo(p0.x, p0.y, mx, my);
+                ctx.lineTo(p1.x, p1.y);
+              }
+              ctx.lineTo(p1.x, height);
+              ctx.closePath();
+
+              const segGrad = ctx.createLinearGradient(0, 0, 0, height);
+              segGrad.addColorStop(0, parseColorToRgba(c0, fillAlpha));
+              segGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+              ctx.fillStyle = segGrad;
+              ctx.fill();
+            } else {
+              // Transição de cores: fatia esquerda c0, fatia direita c1
+              ctx.beginPath();
+              ctx.moveTo(p0.x, height);
+              ctx.lineTo(p0.x, p0.y);
+              ctx.lineTo(mx, my);
+              ctx.lineTo(mx, height);
+              ctx.closePath();
+              const g0 = ctx.createLinearGradient(0, 0, 0, height);
+              g0.addColorStop(0, parseColorToRgba(c0, fillAlpha));
+              g0.addColorStop(1, 'rgba(0, 0, 0, 0)');
+              ctx.fillStyle = g0;
+              ctx.fill();
+
+              ctx.beginPath();
+              ctx.moveTo(mx, height);
+              ctx.lineTo(mx, my);
+              ctx.lineTo(p1.x, p1.y);
+              ctx.lineTo(p1.x, height);
+              ctx.closePath();
+              const g1 = ctx.createLinearGradient(0, 0, 0, height);
+              g1.addColorStop(0, parseColorToRgba(c1, fillAlpha));
+              g1.addColorStop(1, 'rgba(0, 0, 0, 0)');
+              ctx.fillStyle = g1;
+              ctx.fill();
+            }
+          }
+
+          // Traçado da linha
+          ctx.beginPath();
+          ctx.moveTo(p0.x, p0.y);
+          if (effectiveInterpolation === 'straight') {
+            ctx.lineTo(p1.x, p1.y);
+          } else {
+            ctx.quadraticCurveTo(p0.x, p0.y, mx, my);
+            ctx.lineTo(p1.x, p1.y);
+          }
+
+          if (c0 === c1) {
+            ctx.strokeStyle = parseColorToRgba(c0, 1.0);
+          } else {
+            const segGrad = ctx.createLinearGradient(p0.x, p0.y, p1.x, p1.y);
+            segGrad.addColorStop(0, parseColorToRgba(c0, 1.0));
+            segGrad.addColorStop(1, parseColorToRgba(c1, 1.0));
+            ctx.strokeStyle = segGrad;
+          }
+          ctx.lineWidth = lineWidth;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.stroke();
+        }
+      }
     });
 
     // 3. Marcador final (ponto luminoso no último valor do segmento mais recente)
     const lastSeg = segments[segments.length - 1];
     if (lastSeg && lastSeg.length > 0) {
       const lastPt = lastSeg[lastSeg.length - 1];
+      const lastColor = getPointColor(lastPt.v, lastPt.t);
       ctx.save();
-      ctx.shadowColor = lineColor;
+      ctx.shadowColor = lastColor;
       ctx.shadowBlur = 4;
-      ctx.fillStyle = lineColor;
+      ctx.fillStyle = lastColor;
       ctx.beginPath();
       ctx.arc(lastPt.x, lastPt.y, 2, 0, Math.PI * 2);
       ctx.fill();
@@ -1361,11 +1908,11 @@ export const TimeSeriesRenderer: React.FC<TimeSeriesRendererProps> = ({
         if (closest) {
           const ptNormX = Math.max(0, Math.min(1, (closest.t - tStart) / timeSpan));
           const ptX = ptNormX * containerWidth;
-          const ptNormY = Math.max(0, Math.min(1, (closest.v - minVal) / valRange));
-          const ptY = height - 2 - ptNormY * (height - 5);
+          const ptY = calcPy(closest.v);
+          const ptColor = getPointColor(closest.v, closest.t);
           ctx.save();
           ctx.fillStyle = '#ffffff';
-          ctx.strokeStyle = lineColor;
+          ctx.strokeStyle = ptColor;
           ctx.lineWidth = 1.5;
           ctx.beginPath();
           ctx.arc(ptX, ptY, 2.5, 0, Math.PI * 2);
@@ -1384,12 +1931,18 @@ export const TimeSeriesRenderer: React.FC<TimeSeriesRendererProps> = ({
     containerWidth,
     height,
     lineColor,
+    normalLineColor,
+    thresholds,
     lineWidth,
     areaOpacity,
     lineInterpolation,
     disconnectThreshold,
     isCrosshairActiveForCol,
     hoveredTimestamp,
+    binaryStepHighlight,
+    episodes,
+    violationColor,
+    thresholdComparisonMode,
   ]);
 
   const handlePointerHover = useCallback(

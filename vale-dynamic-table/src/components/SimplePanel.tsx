@@ -12,6 +12,7 @@ import {
 import {
   SimpleOptions, CardTheme,
   NativeThresholdsConfig, ThresholdStep, CustomFieldConfig, DisconnectThresholdMode,
+  ThresholdComparisonMode,
 } from '../types';
 import { css, cx } from '@emotion/css';
 import { useStyles2, Icon, useTheme2 } from '@grafana/ui';
@@ -121,33 +122,337 @@ export function formatFieldValue(raw: unknown, field: Field, theme: GrafanaTheme
   return { text: display.text + (display.suffix ? display.suffix : ''), color: display.color };
 }
 
+export interface ColumnThresholdResult {
+  isViolation: boolean;
+  color: string;
+  activeStep: ThresholdStep | null;
+  baseStep: ThresholdStep | null;
+}
+
+/**
+ * Motor Universal de Avaliação de Thresholds
+ * Suporta os modos 'gte' (>=), 'eq' (==) e 'lte' (<=).
+ *
+ * No modo 'eq' (==): SÓ PINTA se o valor for ESTRITAMENTE IGUAL ao step (ignorando -Infinity / base).
+ * Ex: se Ping = 1 (Up) e threshold é == 0 (Vermelho), deve retornar a cor base/saudável, não vermelho!
+ */
+export function resolveColumnThreshold(
+  value: number | null | undefined,
+  thresholds: NativeThresholdsConfig | undefined,
+  comparisonMode: ThresholdComparisonMode = 'gte',
+  theme?: GrafanaTheme2,
+  healthyFallbackColor = '#10b981'
+): ColumnThresholdResult {
+  if (!thresholds?.steps || thresholds.steps.length === 0) {
+    return {
+      isViolation: false,
+      color: healthyFallbackColor,
+      activeStep: null,
+      baseStep: null,
+    };
+  }
+
+  const steps = thresholds.steps;
+
+  // Base step é o step com valor nulo/indefinido/-Infinity
+  const baseStep =
+    steps.find(
+      (s) =>
+        s.value === null ||
+        s.value === undefined ||
+        (s.value as any) === '' ||
+        Number(s.value) === -Infinity ||
+        isNaN(Number(s.value))
+    ) || steps[0];
+
+  const baseColor = baseStep?.color ? resolveAlertHexColor(baseStep.color) : healthyFallbackColor;
+
+  if (value === null || value === undefined || isNaN(Number(value))) {
+    return {
+      isViolation: false,
+      color: baseColor,
+      activeStep: baseStep,
+      baseStep,
+    };
+  }
+
+  const numVal = Number(value);
+
+  // Steps de violação configurados (valores numéricos finitos diferentes da base)
+  const violationSteps = steps.filter(
+    (s) =>
+      s !== baseStep &&
+      s.value !== null &&
+      s.value !== undefined &&
+      (s.value as any) !== '' &&
+      Number(s.value) !== -Infinity &&
+      !isNaN(Number(s.value))
+  );
+
+  if (violationSteps.length === 0) {
+    return {
+      isViolation: false,
+      color: baseColor,
+      activeStep: baseStep,
+      baseStep,
+    };
+  }
+
+  if (comparisonMode === 'eq') {
+    // No modo 'eq' (==), SÓ PINTA se o valor for ESTRITAMENTE IGUAL ao step (ignorando o -Infinity)
+    const matched = violationSteps.find((s) => Math.abs(numVal - Number(s.value)) < 1e-6);
+    if (matched) {
+      return {
+        isViolation: true,
+        color: resolveAlertHexColor(matched.color),
+        activeStep: matched,
+        baseStep,
+      };
+    }
+    return {
+      isViolation: false,
+      color: baseColor,
+      activeStep: baseStep,
+      baseStep,
+    };
+  }
+
+  if (comparisonMode === 'lte') {
+    // No modo 'lte' (<=): o menor valor violado é o mais crítico
+    const sortedLte = [...violationSteps].sort((a, b) => Number(a.value) - Number(b.value));
+    const matched = sortedLte.find((s) => numVal <= Number(s.value));
+    if (matched) {
+      return {
+        isViolation: true,
+        color: resolveAlertHexColor(matched.color),
+        activeStep: matched,
+        baseStep,
+      };
+    }
+    return {
+      isViolation: false,
+      color: baseColor,
+      activeStep: baseStep,
+      baseStep,
+    };
+  }
+
+  // Modo 'gte' (>=) padrão: o maior valor atingido é a violação ativa
+  const sortedGte = [...violationSteps].sort((a, b) => Number(b.value) - Number(a.value));
+  const matched = sortedGte.find((s) => numVal >= Number(s.value));
+  if (matched) {
+    return {
+      isViolation: true,
+      color: resolveAlertHexColor(matched.color),
+      activeStep: matched,
+      baseStep,
+    };
+  }
+
+  return {
+    isViolation: false,
+    color: baseColor,
+    activeStep: baseStep,
+    baseStep,
+  };
+}
+
 /** Retorna o step de threshold ativo para um valor dado um NativeThresholdsConfig. */
 export function getActiveNativeThreshold(
   value: number,
   cfg: NativeThresholdsConfig | null | undefined,
-  exactMatch = false
+  exactMatchOrMode: boolean | ThresholdComparisonMode = false
 ): ThresholdStep | null {
   if (!cfg?.steps?.length) { return null; }
-  const steps = [...cfg.steps].sort((a, b) => {
-    const av = a.value !== null && a.value !== undefined ? Number(a.value) : -Infinity;
-    const bv = b.value !== null && b.value !== undefined ? Number(b.value) : -Infinity;
-    if (av === bv) return 0;
-    return av - bv;
-  });
-
-  if (exactMatch) {
-    const match = steps.find((s) => s.value !== null && s.value !== undefined && Math.abs(value - Number(s.value)) < 1e-6);
-    return match ?? steps[0];
-  }
-
-  let active = steps[0];
-  for (const s of steps) {
-    const sv = s.value !== null && s.value !== undefined ? Number(s.value) : -Infinity;
-    if (value >= sv) { active = s; }
-  }
-  return active ?? null;
+  const mode: ThresholdComparisonMode =
+    typeof exactMatchOrMode === 'string'
+      ? exactMatchOrMode
+      : exactMatchOrMode
+      ? 'eq'
+      : 'gte';
+  const result = resolveColumnThreshold(value, cfg, mode);
+  return result.activeStep;
 }
 
+
+const COMPOSITE_OVERRIDE_KEYS = [
+  'timeSeriesConfig',
+  'badgeConfig',
+  'progressConfig',
+  'textConfig',
+  'deltaConfig',
+  'alertConfig',
+] as const;
+
+function doesOverrideMatchField(override: any, field: Field): boolean {
+  const fieldName = field.name;
+  const displayName = field.state?.displayName;
+  return Boolean(
+    !override.matcher ||
+      (override.matcher.id === 'byName' &&
+        (override.matcher.options === fieldName ||
+          (displayName && override.matcher.options === displayName))) ||
+      (override.matcher.id === 'byRegexp' &&
+        (new RegExp(override.matcher.options).test(fieldName) ||
+          (displayName && new RegExp(override.matcher.options).test(displayName)))) ||
+      (override.matcher.id === 'byType' && override.matcher.options === field.type)
+  );
+}
+
+/**
+ * Busca o valor de uma propriedade específica nos Overrides do campo.
+ * Retorna undefined se o usuário NÃO tiver adicionado um override explícito para este campo.
+ * Suporta tanto propriedades individuais quanto os pacotes compostos (Aba Completa por Modo).
+ */
+export function getFieldOverrideProperty<T = any>(
+  field: Field | undefined,
+  propName: string,
+  panelFieldConfig?: FieldConfigSource
+): T | undefined {
+  if (!field) {
+    return undefined;
+  }
+
+  if (panelFieldConfig?.overrides) {
+    for (const override of panelFieldConfig.overrides) {
+      if (doesOverrideMatchField(override, field) && override.properties) {
+        // 1. Propriedade direta (ex: custom.lineWidth)
+        const directProp = override.properties.find(
+          (p: any) => p.id === `custom.${propName}` || p.id === propName
+        );
+        if (directProp && directProp.value !== undefined) {
+          return directProp.value as T;
+        }
+
+        // 2. Propriedade dentro de pacote composto (ex: custom.timeSeriesConfig.lineWidth)
+        for (const compKey of COMPOSITE_OVERRIDE_KEYS) {
+          const compProp = override.properties.find(
+            (p: any) => p.id === `custom.${compKey}` || p.id === compKey
+          );
+          if (compProp && compProp.value && typeof compProp.value === 'object') {
+            if (compProp.value[propName] !== undefined) {
+              return compProp.value[propName] as T;
+            }
+            if (propName === 'cellDisplayMode') {
+              if (compKey === 'timeSeriesConfig') return 'sparkline' as unknown as T;
+              if (compKey === 'badgeConfig') return 'badge' as unknown as T;
+              if (compKey === 'progressConfig') return (compProp.value.barType || 'progressBar') as unknown as T;
+              if (compKey === 'deltaConfig') return 'deltaTrend' as unknown as T;
+              if (compKey === 'textConfig') return 'text' as unknown as T;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Fallback: verifica os pacotes compostos já mesclados pelo Grafana em field.config.custom
+  const rawCustom = (field.config?.custom ?? {}) as Record<string, any>;
+  for (const compKey of COMPOSITE_OVERRIDE_KEYS) {
+    const compObj = rawCustom[compKey];
+    if (compObj && typeof compObj === 'object') {
+      if (compObj[propName] !== undefined) {
+        return compObj[propName] as T;
+      }
+      if (propName === 'cellDisplayMode') {
+        if (compKey === 'timeSeriesConfig') return 'sparkline' as unknown as T;
+        if (compKey === 'badgeConfig') return 'badge' as unknown as T;
+        if (compKey === 'progressConfig') return (compObj.barType || 'progressBar') as unknown as T;
+        if (compKey === 'deltaConfig') return 'deltaTrend' as unknown as T;
+        if (compKey === 'textConfig') return 'text' as unknown as T;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Mescla field.config.custom com quaisquer pacotes compostos (Aba Completa por Modo)
+ * aplicados via Override Properties. Se o usuário adicionou uma aba de visualização
+ * (ex: timeSeriesConfig, badgeConfig, progressConfig, deltaConfig, textConfig),
+ * ativa automaticamente o respectivo cellDisplayMode na coluna.
+ */
+export function getEffectiveCustomConfig(
+  field: Field | undefined,
+  panelFieldConfig?: FieldConfigSource
+): CustomFieldConfig {
+  if (!field) {
+    return {};
+  }
+  const base = { ...(field.config?.custom ?? {}) } as CustomFieldConfig;
+  // 'label' é exclusivo de Override Properties (hideFromDefaults: true);
+  // nunca herda valores residuais salvos em fieldConfig.defaults.custom.label.
+  delete base.label;
+  let inferredMode: CustomFieldConfig['cellDisplayMode'] | undefined;
+  let hasExplicitModeOverride = false;
+
+  // Mescla pacotes compostos vindos de field.config.custom
+  if (base.textConfig && typeof base.textConfig === 'object') {
+    Object.assign(base, base.textConfig);
+    inferredMode = 'text';
+  }
+  if (base.badgeConfig && typeof base.badgeConfig === 'object') {
+    Object.assign(base, base.badgeConfig);
+    inferredMode = 'badge';
+  }
+  if (base.progressConfig && typeof base.progressConfig === 'object') {
+    Object.assign(base, base.progressConfig);
+    inferredMode = base.progressConfig.barType || 'progressBar';
+  }
+  if (base.deltaConfig && typeof base.deltaConfig === 'object') {
+    Object.assign(base, base.deltaConfig);
+    inferredMode = 'deltaTrend';
+  }
+  if (base.timeSeriesConfig && typeof base.timeSeriesConfig === 'object') {
+    Object.assign(base, base.timeSeriesConfig);
+    if (base.timeSeriesConfig.sparklineHeight === undefined) {
+      delete base.sparklineHeight;
+    }
+    inferredMode = 'sparkline';
+  }
+  if (base.alertConfig && typeof base.alertConfig === 'object') {
+    Object.assign(base, base.alertConfig);
+  }
+
+  // Mescla pacotes compostos e propriedades diretas vindas de panelFieldConfig.overrides
+  if (panelFieldConfig?.overrides) {
+    for (const override of panelFieldConfig.overrides) {
+      if (doesOverrideMatchField(override, field) && override.properties) {
+        for (const prop of override.properties) {
+          if ((prop.id === 'custom.label' || prop.id === 'label') && typeof prop.value === 'string') {
+            base.label = prop.value;
+          }
+          if (prop.id === 'custom.cellDisplayMode' || prop.id === 'cellDisplayMode') {
+            hasExplicitModeOverride = true;
+            base.cellDisplayMode = prop.value;
+          }
+          for (const compKey of COMPOSITE_OVERRIDE_KEYS) {
+            if ((prop.id === `custom.${compKey}` || prop.id === compKey) && prop.value && typeof prop.value === 'object') {
+              Object.assign(base, prop.value);
+              if (compKey === 'timeSeriesConfig') {
+                inferredMode = 'sparkline';
+                if (prop.value.sparklineHeight === undefined) {
+                  delete base.sparklineHeight;
+                }
+              }
+              else if (compKey === 'badgeConfig') inferredMode = 'badge';
+              else if (compKey === 'progressConfig') inferredMode = prop.value.barType || 'progressBar';
+              else if (compKey === 'deltaConfig') inferredMode = 'deltaTrend';
+              else if (compKey === 'textConfig') inferredMode = 'text';
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!hasExplicitModeOverride && inferredMode) {
+    base.cellDisplayMode = inferredMode;
+  }
+
+  return base;
+}
 
 /**
  * Obtém se a métrica avalia thresholds por correspondência exata (==)
@@ -430,10 +735,17 @@ export function getAlertEpisodes(
   thresholds: NativeThresholdsConfig | undefined,
   tStart: number,
   tEnd: number,
-  exactMatch = false,
+  exactMatchOrMode: boolean | ThresholdComparisonMode = false,
   disconnectThreshold: DisconnectThresholdMode = 'auto'
 ): AlertEpisode[] {
   if (!thresholds?.steps) { return []; }
+
+  const mode: ThresholdComparisonMode =
+    typeof exactMatchOrMode === 'string'
+      ? exactMatchOrMode
+      : exactMatchOrMode
+      ? 'eq'
+      : 'gte';
 
   // Deduplicar e ordenar steps válidos (não-nulos) de forma crescente
   const validStepsMap = new Map<number, { value: number; color: string }>();
@@ -485,9 +797,14 @@ export function getAlertEpisodes(
       }
 
       const value = Number(rawVal);
-      const violates = exactMatch
-        ? Math.abs(value - step.value) < 1e-6
-        : value >= step.value;
+      let violates = false;
+      if (mode === 'eq') {
+        violates = Math.abs(value - step.value) < 1e-6;
+      } else if (mode === 'lte') {
+        violates = value <= step.value;
+      } else {
+        violates = value >= step.value;
+      }
 
       if (!violates) {
         close();
@@ -643,22 +960,28 @@ export function getBadgeState(
   tEnd: number,
   _theme: GrafanaTheme2,
   activeThresholdColor?: string | null,
-  exactMatch = false,
+  exactMatchOrMode: boolean | ThresholdComparisonMode = false,
   disconnectThreshold: DisconnectThresholdMode = 'auto'
 ): BadgeInfo {
   if (!thresholds?.steps?.some((s) => s.value !== null)) {
     return { state: 'normal', color: '', episodes: [] };
   }
 
-  const episodes = getAlertEpisodes(allValues, timeValues, thresholds, tStart, tEnd, exactMatch, disconnectThreshold);
+  const mode: ThresholdComparisonMode =
+    typeof exactMatchOrMode === 'string'
+      ? exactMatchOrMode
+      : exactMatchOrMode
+      ? 'eq'
+      : 'gte';
+
+  const episodes = getAlertEpisodes(allValues, timeValues, thresholds, tStart, tEnd, mode, disconnectThreshold);
   const activeEpisodes = episodes.filter((ep) => ep.isActiveNow);
 
   // Estado A — isCurrentlyActive: O valor atual (lastVal) viola o threshold agora
   if (lastVal !== null) {
-    const currentStep = getActiveNativeThreshold(lastVal, thresholds, exactMatch);
-    if (currentStep && currentStep.value !== null) {
-      // Herda a cor do threshold ativo no momento garantida em hexadecimal válido
-      return { state: 'active', color: resolveAlertHexColor(currentStep.color), episodes };
+    const res = resolveColumnThreshold(lastVal, thresholds, mode, _theme);
+    if (res.isViolation) {
+      return { state: 'active', color: res.color, episodes };
     }
   }
 
@@ -1068,6 +1391,7 @@ interface AlertWindowStats {
   windowMs: number;
   spansDays: boolean;
   exactMatch: boolean;
+  comparisonMode?: ThresholdComparisonMode;
   formatValue: (v: number) => string;
 }
 
@@ -1079,11 +1403,11 @@ function getAlertContextSummary(episodes: AlertEpisode[], windowStats: AlertWind
     return 'Nenhuma violação registrada no período.';
   }
 
-  const { totalMs, windowMs, spansDays, exactMatch, formatValue } = windowStats;
+  const { totalMs, windowMs, spansDays, exactMatch, comparisonMode, formatValue } = windowStats;
   const safeWindowMs = Math.max(windowMs, totalMs, 1);
   const alertRatio = Math.min(1, totalMs / safeWindowMs);
   const pct = Math.min(100, Math.round(alertRatio * 100));
-  const op = exactMatch ? '=' : '≥';
+  const op = comparisonMode === 'eq' || exactMatch ? '=' : comparisonMode === 'lte' ? '≤' : '≥';
   const hasActive = episodes.some((ep) => ep.isActiveNow);
   const peakEp = episodes.reduce((prev, curr) => (curr.maxValue > prev.maxValue ? curr : prev), episodes[0]);
 
@@ -1202,6 +1526,7 @@ export interface AlertInspectPayload {
   field: Field;
   theme: GrafanaTheme2;
   exactMatch?: boolean;
+  comparisonMode?: ThresholdComparisonMode;
   fieldConfig?: FieldConfigSource;
   metricLabel: string;
   currentValueText: string;
@@ -1265,7 +1590,7 @@ const AlertLeftDrawer: React.FC<{
     return () => document.removeEventListener('keydown', handleKey);
   }, [onClose]);
 
-  const { badge, tStart, tEnd, field, theme, exactMatch = false, fieldConfig, metricLabel, currentValueText, currentValueColor } = payload;
+  const { badge, tStart, tEnd, field, theme, exactMatch = false, comparisonMode, fieldConfig, metricLabel, currentValueText, currentValueColor } = payload;
 
   const formatValue = useCallback((v: number) => formatFieldValue(v, field, theme).text, [field, theme]);
   const liveThresholds = getFieldThresholds(field, theme, fieldConfig);
@@ -1315,9 +1640,10 @@ const AlertLeftDrawer: React.FC<{
         windowMs: Math.max(0, tEnd - tStart),
         spansDays,
         exactMatch,
+        comparisonMode,
         formatValue,
       }),
-    [resolvedEpisodes, totalMs, tStart, tEnd, spansDays, exactMatch, formatValue]
+    [resolvedEpisodes, totalMs, tStart, tEnd, spansDays, exactMatch, comparisonMode, formatValue]
   );
 
   // Níveis únicos de threshold para as pílulas de filtro rápido
@@ -1754,6 +2080,7 @@ const AlertPopupPortal: React.FC<{
   onExpand: () => void;
   formatValue: (v: number) => string;
   exactMatch?: boolean;
+  comparisonMode?: ThresholdComparisonMode;
   field: Field;
   theme: GrafanaTheme2;
   fieldConfig?: FieldConfigSource;
@@ -1769,6 +2096,7 @@ const AlertPopupPortal: React.FC<{
   onExpand,
   formatValue,
   exactMatch = false,
+  comparisonMode,
   field,
   theme,
   fieldConfig,
@@ -2000,9 +2328,10 @@ const AlertPopupPortal: React.FC<{
         windowMs: Math.max(0, tEnd - tStart),
         spansDays,
         exactMatch,
+        comparisonMode,
         formatValue,
       }),
-    [resolvedEpisodes, totalMs, tStart, tEnd, spansDays, exactMatch, formatValue]
+    [resolvedEpisodes, totalMs, tStart, tEnd, spansDays, exactMatch, comparisonMode, formatValue]
   );
 
   const iconBtnStyle: React.CSSProperties = {
@@ -2305,25 +2634,29 @@ export const AlertBadgePopover: React.FC<{
   badge: BadgeInfo;
   tStart: number;
   tEnd: number;
-  styles: any;
+  styles?: any;
   field: Field;
   exactMatch?: boolean;
+  comparisonMode?: ThresholdComparisonMode;
   fieldConfig?: FieldConfigSource;
   metricLabel?: string;
   currentValueText?: string;
   currentValueColor?: string;
   size?: number;
+  allowNormal?: boolean;
 }> = ({
   badge,
   tStart,
   tEnd,
   field,
   exactMatch,
+  comparisonMode,
   fieldConfig,
   metricLabel,
   currentValueText,
   currentValueColor,
   size = 18,
+  allowNormal = false,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
   const [isPinned, setIsPinned] = useState(false);
@@ -2354,10 +2687,12 @@ export const AlertBadgePopover: React.FC<{
     setIsPinned(true);
   }, []);
 
-  if (badge.state === 'normal') return null;
+  if (badge.state === 'normal' && !allowNormal) return null;
 
+  const isNormal = badge.state === 'normal';
   const isHistory = badge.state === 'historical';
   const liveThresholds = getFieldThresholds(field, theme, fieldConfig);
+  const effectiveMode: ThresholdComparisonMode = comparisonMode || (exactMatch ? 'eq' : 'gte');
 
   // Determina o valor atual da métrica para garantir a cor do threshold ativo agora
   let currentLastVal: number | null = null;
@@ -2372,20 +2707,30 @@ export const AlertBadgePopover: React.FC<{
     }
   }
 
-  const currentStep = currentLastVal !== null ? getActiveNativeThreshold(currentLastVal, liveThresholds, exactMatch) : null;
+  const currentStep = currentLastVal !== null ? getActiveNativeThreshold(currentLastVal, liveThresholds, effectiveMode) : null;
   const currentThresholdColor = (currentStep && currentStep.value !== null && currentStep.color) ? currentStep.color : null;
 
   const activeEpisodes = badge.episodes.filter((e) => e.isActiveNow);
   const activeEpisode = activeEpisodes.sort((a, b) => b.stepValue - a.stepValue)[0];
   const activeStep = activeEpisode
     ? (liveThresholds?.steps.find((s) => s.value !== null && Math.abs(Number(s.value) - Number(activeEpisode.stepValue)) < 1e-6)
-       || getActiveNativeThreshold(activeEpisode.maxValue, liveThresholds, exactMatch))
+       || getActiveNativeThreshold(activeEpisode.maxValue, liveThresholds, effectiveMode))
     : null;
 
   const activeColor = currentThresholdColor || activeStep?.color || badge.color || '#E24D42';
-  const badgeColor = isHistory ? '#EAB839' : activeColor;
-  const bgAlpha = (isPinned || isDrawerOpen) ? (isHistory ? 0.18 : 0.28) : (isHistory ? 0.08 : 0.16);
-  const borderAlpha = (isPinned || isDrawerOpen) ? 0.75 : 0.55;
+  const badgeColor = isHistory
+    ? '#EAB839'
+    : isNormal
+    ? 'rgba(255, 255, 255, 0.45)'
+    : activeColor;
+  const bgAlpha = (isPinned || isDrawerOpen)
+    ? (isHistory ? 0.18 : isNormal ? 0.12 : 0.28)
+    : (isHistory ? 0.08 : isNormal ? 0.04 : 0.16);
+  const borderAlpha = (isPinned || isDrawerOpen)
+    ? 0.75
+    : isNormal
+    ? 0.25
+    : 0.55;
 
   const customCfg = (field.config?.custom ?? {}) as CustomFieldConfig;
   const resolvedLabel = metricLabel || customCfg.label || field.state?.displayName || field.name || 'Métrica';
@@ -2398,6 +2743,7 @@ export const AlertBadgePopover: React.FC<{
     field,
     theme,
     exactMatch,
+    comparisonMode: effectiveMode,
     fieldConfig,
     metricLabel: resolvedLabel,
     currentValueText: resolvedValueText,
@@ -2483,6 +2829,8 @@ export const AlertBadgePopover: React.FC<{
         title={
           isHistory
             ? (isPinned ? 'Clique para fechar' : 'Excursão registrada na janela — clique para detalhes')
+            : isNormal
+            ? (isPinned ? 'Clique para fechar' : 'Operacional / Sem alertas — clique para detalhes e histórico')
             : (isPinned ? 'Clique para fechar' : 'Threshold ativo neste momento — clique para detalhes')
         }
       >
@@ -2505,6 +2853,7 @@ export const AlertBadgePopover: React.FC<{
           onExpand={handleExpandToDrawer}
           formatValue={formatValue}
           exactMatch={exactMatch}
+          comparisonMode={effectiveMode}
           field={field}
           theme={theme}
           fieldConfig={fieldConfig}
@@ -2995,8 +3344,9 @@ export const SimplePanel: React.FC<Props> = ({
               className={singleIconStyle === 'clean' ? styles.iconClean : styles.iconWrap} 
               style={{ 
                 color: iconColor, 
-                backgroundColor: singleIconStyle === 'clean' ? 'transparent' : `color-mix(in srgb, ${iconColor} 20%, transparent)`,
-                border: singleIconStyle === 'clean' ? 'none' : `1px solid color-mix(in srgb, ${iconColor} 30%, transparent)`
+                backgroundColor: singleIconStyle === 'clean' ? 'transparent' : `color-mix(in srgb, ${iconColor} 18%, transparent)`,
+                border: singleIconStyle === 'clean' ? 'none' : `1px solid color-mix(in srgb, ${iconColor} 30%, transparent)`,
+                boxShadow: singleIconStyle === 'clean' ? 'none' : `0 0 6px color-mix(in srgb, ${iconColor} 16%, transparent)`,
               }}
             >
               <Icon name={resolveIconName(singleIcon) as any} size={singleIconStyle === 'clean' ? 'lg' : 'sm'} />
@@ -3240,8 +3590,9 @@ export const SimplePanel: React.FC<Props> = ({
                       className={currentIconStyle === 'clean' ? styles.multiCardIconClean : styles.multiCardIcon}
                       style={{ 
                         color: multiIconColor, 
-                        backgroundColor: currentIconStyle === 'clean' ? 'transparent' : `color-mix(in srgb, ${multiIconColor} 20%, transparent)`,
-                        border: currentIconStyle === 'clean' ? 'none' : `1px solid color-mix(in srgb, ${multiIconColor} 30%, transparent)`
+                        backgroundColor: currentIconStyle === 'clean' ? 'transparent' : `color-mix(in srgb, ${multiIconColor} 18%, transparent)`,
+                        border: currentIconStyle === 'clean' ? 'none' : `1px solid color-mix(in srgb, ${multiIconColor} 30%, transparent)`,
+                        boxShadow: currentIconStyle === 'clean' ? 'none' : `0 0 6px color-mix(in srgb, ${multiIconColor} 16%, transparent)`,
                       }}
                     >
                       <Icon name={resolveIconName(serieIcon) as any} size={currentIconStyle === 'clean' ? 'lg' : 'sm'} />

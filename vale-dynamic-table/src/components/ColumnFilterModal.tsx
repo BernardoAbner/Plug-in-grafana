@@ -21,8 +21,6 @@ export interface ColumnFilterModalProps {
   onApply: (colKey: string, filter: ColumnFilterConfig | null) => void;
   onClose: () => void;
   onExpand?: () => void;
-  isSingleHostMode?: boolean;
-  onToggleSingleHostMode?: () => void;
 }
 
 const OPERATOR_OPTIONS: Array<{ op: FilterOperator; label: string; desc: string }> = [
@@ -105,8 +103,6 @@ const FilterLeftDrawer: React.FC<{
   onApply: (colKey: string, filter: ColumnFilterConfig | null) => void;
   onCollapse: () => void;
   onClose: () => void;
-  isSingleHostMode?: boolean;
-  onToggleSingleHostMode?: () => void;
 }> = ({
   colKey,
   colTitle,
@@ -115,8 +111,6 @@ const FilterLeftDrawer: React.FC<{
   onApply,
   onCollapse,
   onClose,
-  isSingleHostMode,
-  onToggleSingleHostMode,
 }) => {
   const [entered, setEntered] = useState(false);
 
@@ -245,10 +239,6 @@ const FilterLeftDrawer: React.FC<{
     transition: 'opacity 0.15s ease, background-color 0.15s ease',
     flexShrink: 0,
   };
-
-  const showSingleHostButton =
-    onToggleSingleHostMode &&
-    (uniqueValues.length === 1 || draftSelectedValues.length === 1 || isSingleHostMode);
 
   return createPortal(
     <div
@@ -562,11 +552,15 @@ const FilterLeftDrawer: React.FC<{
             flexDirection: 'column',
             gap: 3,
             flex: 1,
+            minHeight: 0,
             overflowY: 'auto',
+            overflowX: 'hidden',
             padding: '6px',
             borderRadius: 6,
             background: 'rgba(0, 0, 0, 0.22)',
             border: '1px solid rgba(255, 255, 255, 0.06)',
+            boxSizing: 'border-box',
+            width: '100%',
           }}
         >
           {visibleItems.length === 0 ? (
@@ -599,23 +593,27 @@ const FilterLeftDrawer: React.FC<{
                     border: isChecked
                       ? '1px solid rgba(255, 255, 255, 0.08)'
                       : '1px solid transparent',
-                    flexShrink: 0,
+                    boxSizing: 'border-box',
+                    width: '100%',
+                    minWidth: 0,
                   }}
                 >
                   <input
                     type="checkbox"
                     checked={isChecked}
                     onChange={() => handleToggleItem(val)}
-                    style={{ cursor: 'pointer', accentColor: '#94a3b8', margin: 0 }}
+                    style={{ cursor: 'pointer', accentColor: '#94a3b8', margin: 0, flexShrink: 0 }}
                   />
                   <span
                     style={{
+                      flex: 1,
                       fontSize: 11.5,
                       fontWeight: isChecked ? 500 : 400,
                       color: isChecked ? 'rgba(255, 255, 255, 0.9)' : 'rgba(255, 255, 255, 0.55)',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
+                      minWidth: 0,
                     }}
                     title={val}
                   >
@@ -627,40 +625,6 @@ const FilterLeftDrawer: React.FC<{
           )}
         </div>
 
-        {showSingleHostButton && (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              padding: '8px 10px',
-              borderRadius: 6,
-              background: 'rgba(255, 255, 255, 0.03)',
-              border: '1px solid rgba(255, 255, 255, 0.08)',
-              flexShrink: 0,
-            }}
-          >
-            <span style={{ fontSize: 11, color: 'rgba(255, 255, 255, 0.72)' }}>
-              Visualização de 1 Host:
-            </span>
-            <button
-              type="button"
-              onClick={() => onToggleSingleHostMode?.()}
-              style={{
-                padding: '3px 10px',
-                borderRadius: 4,
-                fontSize: 11,
-                fontWeight: 600,
-                cursor: 'pointer',
-                color: '#ffffff',
-                background: 'rgba(255, 255, 255, 0.1)',
-                border: '1px solid rgba(255, 255, 255, 0.18)',
-              }}
-            >
-              {isSingleHostMode ? 'Mudar para Tabela' : 'Mudar para 1 Host'}
-            </button>
-          </div>
-        )}
       </div>
 
       {/* 3. Rodapé Fixo com Limpar, Cancelar e OK */}
@@ -747,8 +711,6 @@ export const ColumnFilterModal: React.FC<ColumnFilterModalProps> = ({
   onApply,
   onClose,
   onExpand,
-  isSingleHostMode,
-  onToggleSingleHostMode,
 }) => {
   const popupRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ top: number; left: number; opacity: number; maxHeight: number }>({
@@ -801,9 +763,8 @@ export const ColumnFilterModal: React.FC<ColumnFilterModalProps> = ({
     const GAP = 8;
 
     const availableAbove = anchorRect.top - GAP - MARGIN;
-    const targetMaxH = availableAbove >= 260
-      ? Math.min(480, Math.floor(availableAbove))
-      : Math.min(460, vh - MARGIN * 2);
+    const availableBelow = vh - anchorRect.bottom - GAP - MARGIN;
+    const targetMaxH = Math.min(500, Math.max(320, Math.floor(Math.max(availableAbove, availableBelow, 320))));
 
     popup.style.maxHeight = `${targetMaxH}px`;
     const popupW = popup.offsetWidth;
@@ -1013,10 +974,6 @@ export const ColumnFilterModal: React.FC<ColumnFilterModalProps> = ({
     flexShrink: 0,
   };
 
-  const showSingleHostButton =
-    onToggleSingleHostMode &&
-    (uniqueValues.length === 1 || draftSelectedValues.length === 1 || isSingleHostMode);
-
   return createPortal(
     <div
       ref={popupRef}
@@ -1133,10 +1090,13 @@ export const ColumnFilterModal: React.FC<ColumnFilterModalProps> = ({
         style={{
           flex: 1,
           overflowY: 'auto',
+          overflowX: 'hidden',
           padding: '12px 14px',
           display: 'flex',
           flexDirection: 'column',
           gap: 10,
+          boxSizing: 'border-box',
+          width: '100%',
         }}
       >
         <div
@@ -1150,6 +1110,9 @@ export const ColumnFilterModal: React.FC<ColumnFilterModalProps> = ({
             border: '1px solid rgba(255,255,255,0.07)',
             flex: 1,
             minHeight: 0,
+            overflow: 'hidden',
+            boxSizing: 'border-box',
+            width: '100%',
           }}
         >
           {/* Barra "Buscar na lista" com o botão de Condição de Comparação integrado */}
@@ -1342,9 +1305,11 @@ export const ColumnFilterModal: React.FC<ColumnFilterModalProps> = ({
           {/* Lista rolável de checkboxes ampliada */}
           <div
             style={{
+              flex: 1,
+              minHeight: 70,
               maxHeight: 220,
-              minHeight: 130,
               overflowY: 'auto',
+              overflowX: 'hidden',
               display: 'flex',
               flexDirection: 'column',
               gap: 2,
@@ -1352,6 +1317,8 @@ export const ColumnFilterModal: React.FC<ColumnFilterModalProps> = ({
               borderRadius: 5,
               background: 'rgba(0, 0, 0, 0.22)',
               border: '1px solid rgba(255, 255, 255, 0.05)',
+              boxSizing: 'border-box',
+              width: '100%',
             }}
           >
             {visibleItems.length === 0 ? (
@@ -1374,22 +1341,27 @@ export const ColumnFilterModal: React.FC<ColumnFilterModalProps> = ({
                       cursor: 'pointer',
                       userSelect: 'none',
                       background: isChecked ? 'rgba(255, 255, 255, 0.05)' : 'transparent',
+                      boxSizing: 'border-box',
+                      width: '100%',
+                      minWidth: 0,
                     }}
                   >
                     <input
                       type="checkbox"
                       checked={isChecked}
                       onChange={() => handleToggleItem(val)}
-                      style={{ cursor: 'pointer', accentColor: '#94a3b8', margin: 0 }}
+                      style={{ cursor: 'pointer', accentColor: '#94a3b8', margin: 0, flexShrink: 0 }}
                     />
                     <span
                       style={{
+                        flex: 1,
                         fontSize: 11.5,
                         fontWeight: isChecked ? 500 : 400,
                         color: isChecked ? 'rgba(255, 255, 255, 0.9)' : 'rgba(255, 255, 255, 0.55)',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
+                        minWidth: 0,
                       }}
                       title={val}
                     >
@@ -1401,41 +1373,6 @@ export const ColumnFilterModal: React.FC<ColumnFilterModalProps> = ({
             )}
           </div>
         </div>
-
-        {/* Alternância rápida quando há 1 único host */}
-        {showSingleHostButton && (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 8,
-              padding: '7px 10px',
-              borderRadius: 6,
-              background: 'rgba(255,255,255,0.025)',
-              border: '1px solid rgba(255,255,255,0.07)',
-              flexShrink: 0,
-            }}
-          >
-            <span style={{ fontSize: 11, color: 'rgba(255, 255, 255, 0.7)' }}>Modo de exibição (1 host):</span>
-            <button
-              type="button"
-              onClick={() => onToggleSingleHostMode?.()}
-              style={{
-                padding: '3px 9px',
-                borderRadius: 4,
-                fontSize: 10.5,
-                fontWeight: 600,
-                cursor: 'pointer',
-                color: '#ffffff',
-                background: 'rgba(255, 255, 255, 0.1)',
-                border: '1px solid rgba(255, 255, 255, 0.18)',
-              }}
-            >
-              {isSingleHostMode ? 'Ver em Tabela' : 'Ver Host Único'}
-            </button>
-          </div>
-        )}
       </div>
 
       {/* Bloco 3: Rodapé Fixo com Limpar, Cancelar e OK */}
@@ -1521,8 +1458,6 @@ export const FilterBadgePopover: React.FC<{
   theme: GrafanaTheme2;
   onApply: (colKey: string, filter: ColumnFilterConfig | null) => void;
   size?: number;
-  isSingleHostMode?: boolean;
-  onToggleSingleHostMode?: () => void;
 }> = ({
   colKey,
   colTitle,
@@ -1530,8 +1465,6 @@ export const FilterBadgePopover: React.FC<{
   getUniqueValues,
   theme,
   onApply,
-  isSingleHostMode,
-  onToggleSingleHostMode,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -1602,33 +1535,99 @@ export const FilterBadgePopover: React.FC<{
         e.stopPropagation();
       }}
     >
-      {/* Símbolo de Filtro limpo (abre estritamente no clique) */}
-      <div
-        ref={triggerRef}
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          padding: '2px',
-          color: iconColor,
-          cursor: 'pointer',
-          flexShrink: 0,
-          transition: 'color 0.15s ease, transform 0.15s ease',
-          transform: isOpen || isDrawerOpen ? 'scale(1.1)' : 'scale(1)',
-        }}
-        onMouseEnter={() => setIsHoveredIcon(true)}
-        onMouseLeave={() => setIsHoveredIcon(false)}
-        onClick={handleClick}
-        title={
-          isOpen
-            ? 'Clique para fechar'
-            : isFilterActive
-            ? `Filtro ativo em ${colTitle} — clique para editar`
-            : `Filtrar ${colTitle}`
-        }
-      >
-        <Icon name="filter" size="xs" style={{ color: iconColor }} />
-      </div>
+      {/* Símbolo de Filtro: quando ativo, destaca o ícone e inclui botão '×' discreto sem retângulo */}
+      {isFilterActive ? (
+        <div
+          ref={triggerRef}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 3,
+            padding: '2px',
+            background: 'transparent',
+            border: 'none',
+            flexShrink: 0,
+          }}
+        >
+          {/* Ícone de filtro ativo: clique abre para editar */}
+          <div
+            onClick={handleClick}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              color: 'rgba(255, 255, 255, 0.95)',
+              transition: 'transform 0.15s ease, opacity 0.15s ease',
+              transform: isOpen || isDrawerOpen ? 'scale(1.1)' : 'scale(1)',
+            }}
+            title={`Filtro ativo em ${colTitle} — clique para editar`}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLElement).style.opacity = '0.75';
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLElement).style.opacity = '1';
+            }}
+          >
+            <Icon name="filter" size="xs" />
+          </div>
+
+          {/* Botão × discreto e limpo para desfazer o filtro sem retângulo */}
+          <div
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              onApply(colKey, null);
+            }}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              color: 'rgba(255, 255, 255, 0.45)',
+              fontSize: '13px',
+              fontWeight: 500,
+              lineHeight: 1,
+              padding: '0 2px',
+              transition: 'color 0.15s ease',
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLElement).style.color = '#f87171';
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLElement).style.color = 'rgba(255, 255, 255, 0.45)';
+            }}
+            title={`Desfazer filtro de ${colTitle}`}
+          >
+            ×
+          </div>
+        </div>
+      ) : (
+        <div
+          ref={triggerRef}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '2px',
+            color: iconColor,
+            cursor: 'pointer',
+            flexShrink: 0,
+            transition: 'color 0.15s ease, transform 0.15s ease',
+            transform: isOpen || isDrawerOpen ? 'scale(1.1)' : 'scale(1)',
+          }}
+          onMouseEnter={() => setIsHoveredIcon(true)}
+          onMouseLeave={() => setIsHoveredIcon(false)}
+          onClick={handleClick}
+          title={
+            isOpen
+              ? 'Clique para fechar'
+              : `Filtrar ${colTitle}`
+          }
+        >
+          <Icon name="filter" size="xs" style={{ color: iconColor }} />
+        </div>
+      )}
 
       {/* Portal do Pop-up Flutuante: renderizado fora do DOM do painel, direto no body */}
       {isOpen && triggerRect && (
@@ -1642,8 +1641,6 @@ export const FilterBadgePopover: React.FC<{
           onApply={onApply}
           onClose={handleClose}
           onExpand={handleExpandToDrawer}
-          isSingleHostMode={isSingleHostMode}
-          onToggleSingleHostMode={onToggleSingleHostMode}
         />
       )}
 
@@ -1657,8 +1654,6 @@ export const FilterBadgePopover: React.FC<{
           onApply={onApply}
           onCollapse={handleCollapseFromDrawer}
           onClose={handleClose}
-          isSingleHostMode={isSingleHostMode}
-          onToggleSingleHostMode={onToggleSingleHostMode}
         />
       )}
     </div>

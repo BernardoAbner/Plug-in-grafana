@@ -2,8 +2,7 @@ import React, { useEffect, useRef, useCallback } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import { ChartType, LineInterpolation, LinePattern, ThresholdMode, DisconnectThresholdMode } from '../types';
-import { getDisplayProcessor } from '@grafana/data';
-import { css } from '@emotion/css';
+import { getDisplayProcessor, GrafanaTheme2 } from '@grafana/data';
 
 /**
  * Calcula o intervalo típico de coleta (em ms) usando a mediana dos deltas positivos consecutivos.
@@ -295,67 +294,9 @@ export function parseColorToRgba(color: string, alpha: number, theme?: any): str
   return `rgba(45, 212, 191, ${safeAlpha})`;
 }
 
-const getTooltipStyles = (theme: any) => ({
-  tooltip: css`
-    position: absolute;
-    top: 0;
-    left: 0;
-    pointer-events: none;
-    z-index: 100;
-    background: rgba(15, 17, 23, 0.88);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 6px;
-    padding: 8px 12px;
-    min-width: 140px;
-    backdrop-filter: blur(8px);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  `,
-  marker: css`
-    position: absolute;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    transform: translate(-50%, -50%);
-    pointer-events: none;
-    z-index: 99;
-    box-shadow: 0 0 0 2px ${theme.isDark ? '#181b24' : '#ffffff'};
-  `,
-
-  time: css`
-    font-size: 11px;
-    color: ${theme.isDark ? 'rgba(255,255,255,0.5)' : theme.colors.text.secondary};
-    margin-bottom: 6px;
-    font-family: ${theme.typography.fontFamilyMonospace};
-  `,
-  row: css`
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 3px;
-  `,
-  dot: css`
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  `,
-  label: css`
-    flex: 1;
-    color: ${theme.isDark ? 'rgba(255,255,255,0.5)' : theme.colors.text.secondary};
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 100px;
-    font-size: 12px;
-  `,
-  value: css`
-    font-size: 12px;
-    font-weight: 600;
-    font-family: ${theme.typography.fontFamilyMonospace};
-    flex-shrink: 0;
-    color: ${theme.isDark ? '#e2e8f0' : theme.colors.text.primary};
-  `
-});
+import { getChartStyles } from './chartStyles';
+export { getChartStyles };
+export const getTooltipStyles = getChartStyles;
 
 function pad2(n: number): string { return String(n).padStart(2, '0'); }
 
@@ -386,7 +327,7 @@ export interface UplotChartProps {
   showXAxis: boolean;
   yLo: number;
   yHi: number;
-  theme: any;
+  theme: GrafanaTheme2;
   thresholdMode: ThresholdMode;
   useThreshold: boolean;
   thresholdLines?: Array<{ value: number; color: string }>;
@@ -396,6 +337,9 @@ export interface UplotChartProps {
   gridLineColor: string;
   selectedSeriesIndex: number | null;
   disconnectThreshold?: DisconnectThresholdMode;
+  binaryStepHighlight?: boolean;
+  episodes?: Array<{ startTs: number; endTs: number; color?: string }>;
+  lineOpacity?: number;
   onHover: (ts: number | null, points: any[] | null, px: number, py: number) => void;
   onClickTimeRange?: (from: number, to: number) => void;
   onDoubleClick?: () => void;
@@ -407,6 +351,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
   lineWidth, areaOpacity, showPoints, pointSize, showGrid, showYAxis, showXAxis,
   yLo, yHi, theme, thresholdMode, useThreshold, thresholdLines, getSeriesColor,
   axisTextColor, axisLineColor, gridLineColor, selectedSeriesIndex, disconnectThreshold = 'auto',
+  binaryStepHighlight = false, episodes = [], lineOpacity = 100,
   onHover, onClickTimeRange, onDoubleClick, onChartClick
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -450,8 +395,8 @@ export const UplotChart: React.FC<UplotChartProps> = ({
     const data: uPlot.AlignedData = buildAlignedDataWithGaps(seriesInfos, times, disconnectThreshold);
 
     const getPaths = () => {
+      if (binaryStepHighlight || lineInterpolation === 'stepBefore') return uPlot.paths.stepped!({ align: 1 });
       if (lineInterpolation === 'smooth') return uPlot.paths.spline!();
-      if (lineInterpolation === 'stepBefore') return uPlot.paths.stepped!({ align: 1 });
       if (lineInterpolation === 'stepAfter') return uPlot.paths.stepped!({ align: -1 });
       return uPlot.paths.linear!();
     };
@@ -470,11 +415,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
         show: isVisible,
         spanGaps: disconnectThreshold === 'never',
         stroke: (u, seriesIdx) => {
-          if (useThreshold && thresholdMode === 'schema') {
-             // Basic schema: we'll just use the series color for now
-             return color;
-          }
-          return color;
+          return parseColorToRgba(color, 1.0, theme);
         },
         width: lineWidth,
         dash,
@@ -483,6 +424,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
           show: showPoints ? true : false,
           size: showPoints ? pointSize * 2 : 0,
         },
+        fillTo: (u: uPlot) => u.scales.y.min ?? 0,
         fill: (u, seriesIdx) => {
           if (chartType !== 'area') return 'rgba(0,0,0,0)';
           try {
@@ -518,7 +460,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
     const opts: uPlot.Options = {
       width,
       height,
-      padding: [15, 10, 0, 10], // Força 15px de espaço no topo
+      padding: binaryStepHighlight ? [2, 4, 2, 4] : [15, 10, 0, 10], // Padding mínimo para amplitude máxima em modo binário
       cursor: {
         x: true,
         y: true, // Cruz nativa do uPlot segue o mouse livremente
@@ -532,7 +474,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
         x: { time: true, range: () => [timeRange.from / 1000, timeRange.to / 1000] },
         y: {
           auto: false,
-          range: () => [yLo, yHi > yLo ? yHi : yLo + 1],
+          range: () => (binaryStepHighlight ? [0, 1] : [yLo, yHi > yLo ? yHi : yLo + 1]),
         },
       },
       axes: [
@@ -579,9 +521,87 @@ export const UplotChart: React.FC<UplotChartProps> = ({
       hooks: {
         draw: [
           (u) => {
+            const { ctx, bbox } = u;
+            const bottomY = bbox.top + bbox.height;
+
+            // Destaque de trechos/segmentos da linha durante violações de threshold (gradiente apenas da linha para baixo)
+            if (binaryStepHighlight && episodes && episodes.length > 0) {
+              for (let sIdx = 0; sIdx < seriesInfos.length; sIdx++) {
+                const xData = u.data[0];
+                const yData = u.data[sIdx + 1];
+                if (!xData || !yData || xData.length === 0) continue;
+
+                const interp = binaryStepHighlight ? 'stepBefore' : lineInterpolation;
+                const w = lineWidth ?? 1.5;
+
+                ctx.save();
+                for (const ep of episodes) {
+                  const x0 = Math.max(bbox.left, u.valToPos(ep.startTs / 1000, 'x', true));
+                  const x1 = Math.min(bbox.left + bbox.width, u.valToPos(ep.endTs / 1000, 'x', true));
+                  if (x1 <= x0) continue;
+
+                  const alertColor = ep.color || '#F2495C';
+                  const strokeColor = parseColorToRgba(alertColor, 1.0, theme);
+
+                  ctx.save();
+                  ctx.beginPath();
+                  ctx.rect(x0, bbox.top, x1 - x0, bbox.height);
+                  ctx.clip();
+
+                  const pts: Array<{ x: number; y: number }> = [];
+                  for (let i = 0; i < xData.length; i++) {
+                    const val = yData[i];
+                    if (val == null || isNaN(val)) continue;
+                    const px = u.valToPos(xData[i], 'x', true);
+                    const py = u.valToPos(val, 'y', true);
+
+                    if (pts.length > 0) {
+                      const prev = pts[pts.length - 1];
+                      if (interp === 'stepBefore') {
+                        pts.push({ x: px, y: prev.y });
+                      } else if (interp === 'stepAfter') {
+                        pts.push({ x: prev.x, y: py });
+                      }
+                    }
+                    pts.push({ x: px, y: py });
+                  }
+
+                  if (areaOpacity > 0 && pts.length > 1) {
+                    ctx.beginPath();
+                    ctx.moveTo(pts[0].x, bottomY);
+                    for (let i = 0; i < pts.length; i++) {
+                      ctx.lineTo(pts[i].x, pts[i].y);
+                    }
+                    ctx.lineTo(pts[pts.length - 1].x, bottomY);
+                    ctx.closePath();
+
+                    const grad = ctx.createLinearGradient(0, bbox.top, 0, bottomY);
+                    const topAlpha = Math.min(Math.max(areaOpacity, 0), 1);
+                    grad.addColorStop(0, parseColorToRgba(alertColor, topAlpha, theme));
+                    grad.addColorStop(0.65, parseColorToRgba(alertColor, topAlpha * 0.35, theme));
+                    grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+                    ctx.fillStyle = grad;
+                    ctx.fill();
+                  }
+
+                  if (pts.length > 0) {
+                    ctx.beginPath();
+                    ctx.moveTo(pts[0].x, pts[0].y);
+                    for (let i = 1; i < pts.length; i++) {
+                      ctx.lineTo(pts[i].x, pts[i].y);
+                    }
+                    ctx.strokeStyle = strokeColor;
+                    ctx.lineWidth = w;
+                    ctx.stroke();
+                  }
+                  ctx.restore();
+                }
+                ctx.restore();
+              }
+            }
+
             if (!thresholdLines || thresholdLines.length === 0) return;
             
-            const { ctx } = u;
             ctx.save();
             thresholdLines.forEach((line) => {
               // Converter o valor do threshold para a coordenada vertical (pixels)
@@ -822,6 +842,7 @@ export const UplotChart: React.FC<UplotChartProps> = ({
   return (
     <div 
       ref={wrapperRef}
+      className={tooltipStyles.wrapper}
       style={{ width: '100%', height: '100%', position: 'absolute', inset: 0 }} 
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}

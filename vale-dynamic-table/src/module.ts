@@ -1,6 +1,14 @@
-import { PanelPlugin, FieldConfigProperty } from '@grafana/data';
+import { PanelPlugin, FieldConfigProperty, identityOverrideProcessor } from '@grafana/data';
 import { SimpleOptions, CustomFieldConfig } from './types';
 import { TablePanel, currentActivePanelMode } from './components/TablePanel';
+import {
+  TimeSeriesOverrideEditor,
+  BadgeOverrideEditor,
+  ProgressOverrideEditor,
+  TextOverrideEditor,
+  DeltaOverrideEditor,
+  AlertOverrideEditor,
+} from './components/OverrideEditors';
 
 export const INDUSTRIAL_ICON_SELECT_OPTIONS = [
   {
@@ -82,6 +90,23 @@ export function isHeatmapActive(context?: any): boolean {
   return false;
 }
 
+export function isSingleHostActive(context?: any): boolean {
+  if (context?.options?.panelMode === 'singleHost' || context?.panelOptions?.panelMode === 'singleHost') {
+    return true;
+  }
+  if (typeof window !== 'undefined' && (window as any).__VALE_PANEL_MODE__ === 'singleHost') {
+    return true;
+  }
+  if (currentActivePanelMode === 'singleHost') {
+    return true;
+  }
+  return false;
+}
+
+export function isTableDynamicActive(context?: any): boolean {
+  return !isHeatmapActive(context) && !isSingleHostActive(context);
+}
+
 export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(TablePanel)
   .setNoPadding()
   .useFieldConfig({
@@ -94,6 +119,7 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(TablePan
     },
     useCustomConfig: (builder) => {
       const isTableActive = (_c: CustomFieldConfig, context?: any) => !isHeatmapActive(context);
+      const isDynamicTableOnly = (_c: CustomFieldConfig, context?: any) => isTableDynamicActive(context);
 
       builder
         // ── 1. Seletor Principal e Opções Gerais de Célula ──
@@ -105,7 +131,7 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(TablePan
           category: ['Exibição da Célula'],
           settings: {
             options: [
-                            { value: 'text', label: 'Texto / Valor Numérico' },
+              { value: 'text', label: 'Texto / Valor Numérico' },
               { value: 'badge', label: 'Badge / Pílula de Status' },
               { value: 'progressBar', label: 'Barra de Progresso Contínua' },
               { value: 'segmentedBar', label: 'VU Industrial (10 Barras)' },
@@ -121,214 +147,179 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(TablePan
           description: 'Exibe ícone de filtro no cabeçalho desta coluna para busca e filtragem instantânea.',
           defaultValue: false,
           category: ['Exibição da Célula'],
+          showIf: isDynamicTableOnly,
+        })
+
+        // ── 2. Abas Completas por Tipo de Visualização de Célula [Apenas em Override Properties] ──
+        .addCustomEditor({
+          id: 'timeSeriesConfig',
+          path: 'timeSeriesConfig',
+          name: 'Aba Completa: Gráfico (Time Series)',
+          description: 'Traz todas as opções do gráfico (linha, área, altura, cores e thresholds) reunidas em uma única aba.',
+          editor: TimeSeriesOverrideEditor,
+          override: TimeSeriesOverrideEditor,
+          process: identityOverrideProcessor,
+          shouldApply: () => true,
+          hideFromDefaults: true,
+          category: ['Gráfico (Time Series)'],
           showIf: isTableActive,
         })
-        .addBooleanSwitch({
-          path: 'useThresholdColors',
-          name: 'Personalizar Cores pelo Threshold',
-          description: 'Aplica cores de threshold no texto e elementos visuais da célula.',
-          defaultValue: false,
-          category: ['Exibição da Célula'],
+        .addCustomEditor({
+          id: 'badgeConfig',
+          path: 'badgeConfig',
+          name: 'Aba Completa: Badge / Status',
+          description: 'Traz todas as opções de Badge (tamanho, estilo visual e cores de threshold) reunidas em uma única aba.',
+          editor: BadgeOverrideEditor,
+          override: BadgeOverrideEditor,
+          process: identityOverrideProcessor,
+          shouldApply: () => true,
+          hideFromDefaults: true,
+          category: ['Badge / Status'],
           showIf: isTableActive,
         })
-        .addBooleanSwitch({
-          path: 'enableAlertPopup',
-          name: 'Habilitar Botão / Pop-up de Alerta (!)',
-          description: 'Exibe o botão interativo de alerta com histórico de episódios ao lado do nome do host / valor quando houver violação.',
-          defaultValue: true,
-          category: ['Alerta e Pop-up (!)'],
-        })
-
-        // ── 2. Propriedades Condicionais: Gráfico (Time Series / Sparkline) ──
-        .addSelect({
-          path: 'timeSeriesValueMode',
-          name: 'Exibição do Valor no Gráfico',
-          description: 'Define como o valor atual será exibido: Texto, Badge ou Oculto.',
-          defaultValue: 'text',
-          category: ['Gráfico (Time Series)'],
-          settings: {
-            options: [
-              { value: 'text', label: 'Texto / Valor Numérico' },
-              { value: 'badge', label: 'Badge / Pílula de Status' },
-              { value: 'hidden', label: 'Ocultar Valor' },
-            ],
-          },
-          showIf: (c, ctx) => isTableActive(c, ctx) && c?.cellDisplayMode === 'sparkline',
-        })
-        .addNumberInput({
-          path: 'lineWidth',
-          name: 'Espessura da Linha (px)',
-          defaultValue: 1.5,
-          category: ['Gráfico (Time Series)'],
-          settings: { min: 1, max: 6, step: 0.5 },
-          showIf: (c, ctx) => isTableActive(c, ctx) && c?.cellDisplayMode === 'sparkline',
-        })
-        .addNumberInput({
-          path: 'areaOpacity',
-          name: 'Preenchimento / Opacidade da Área (%)',
-          description: '0 = transparente, 100 = opaco.',
-          defaultValue: 25,
-          category: ['Gráfico (Time Series)'],
-          settings: { min: 0, max: 100, step: 5 },
-          showIf: (c, ctx) => isTableActive(c, ctx) && c?.cellDisplayMode === 'sparkline',
-        })
-        .addColorPicker({
-          path: 'lineColor',
-          name: 'Cor da Linha do Gráfico',
-          description: 'Cor padrão da linha quando não sobreposta por threshold.',
-          defaultValue: '#00B59B',
-          category: ['Gráfico (Time Series)'],
-          showIf: (c, ctx) => isTableActive(c, ctx) && c?.cellDisplayMode === 'sparkline',
-        })
-        .addSelect({
-          path: 'lineInterpolation',
-          name: 'Traçado da Linha',
-          defaultValue: 'smooth',
-          category: ['Gráfico (Time Series)'],
-          settings: {
-            options: [
-              { value: 'smooth', label: 'Suave / Arredondado' },
-              { value: 'straight', label: 'Reto' },
-              { value: 'stepBefore', label: 'Degraus (Antes)' },
-              { value: 'stepAfter', label: 'Degraus (Depois)' },
-            ],
-          },
-          showIf: (c, ctx) => isTableActive(c, ctx) && c?.cellDisplayMode === 'sparkline',
-        })
-
-        // ── 3. Propriedades Condicionais: Barras de Progresso e VU Industrial ──
-        .addNumberInput({
-          path: 'progressMin',
-          name: 'Mínimo da Escala',
-          description: 'Valor mínimo da escala para cálculo da porcentagem ou barras acesas (padrão: 0).',
-          defaultValue: 0,
+        .addCustomEditor({
+          id: 'progressConfig',
+          path: 'progressConfig',
+          name: 'Aba Completa: Barras e VU Industrial',
+          description: 'Traz todas as opções de Barra de Progresso e VU Industrial (escala, altura, cor e valor) reunidas em uma única aba.',
+          editor: ProgressOverrideEditor,
+          override: ProgressOverrideEditor,
+          process: identityOverrideProcessor,
+          shouldApply: () => true,
+          hideFromDefaults: true,
           category: ['Barras e VU'],
-          showIf: (c, ctx) => isTableActive(c, ctx) && (c?.cellDisplayMode === 'progressBar' || c?.cellDisplayMode === 'segmentedBar'),
+          showIf: isTableActive,
         })
-        .addNumberInput({
-          path: 'progressMax',
-          name: 'Máximo da Escala',
-          description: 'Valor máximo da escala para cálculo da porcentagem ou barras acesas (padrão: 100).',
-          defaultValue: 100,
-          category: ['Barras e VU'],
-          showIf: (c, ctx) => isTableActive(c, ctx) && (c?.cellDisplayMode === 'progressBar' || c?.cellDisplayMode === 'segmentedBar'),
-        })
-        .addSelect({
-          path: 'progressHeight',
-          name: 'Altura da Barra de Progresso',
-          description: 'Espessura da barra contínua de progresso.',
-          defaultValue: '6px',
-          category: ['Barras e VU'],
-          settings: {
-            options: [
-              { value: '6px', label: 'Fina (6px)' },
-              { value: '8px', label: 'Média (8px)' },
-              { value: '12px', label: 'Alta (12px)' },
-            ],
-          },
-          showIf: (c, ctx) => isTableActive(c, ctx) && c?.cellDisplayMode === 'progressBar',
-        })
-        .addBooleanSwitch({
-          path: 'showProgressValue',
-          name: 'Exibir Valor Numérico',
-          description: 'Mostra o valor formatado ao lado da barra ou VU.',
-          defaultValue: true,
-          category: ['Barras e VU'],
-          showIf: (c, ctx) => isTableActive(c, ctx) && (c?.cellDisplayMode === 'progressBar' || c?.cellDisplayMode === 'segmentedBar'),
-        })
-
-        // ── 4. Propriedades Condicionais: Badge / Status ──
-        .addSelect({
-          path: 'badgeSize',
-          name: 'Tamanho do Badge',
-          description: 'Dimensão do badge na célula.',
-          defaultValue: 'sm',
-          category: ['Badge / Status'],
-          settings: {
-            options: [
-              { value: 'sm', label: 'Pequeno (sm)' },
-              { value: 'md', label: 'Médio (md)' },
-              { value: 'lg', label: 'Grande (lg)' },
-            ],
-          },
-          showIf: (c, ctx) => isTableActive(c, ctx) && c?.cellDisplayMode === 'badge',
-        })
-        .addSelect({
-          path: 'badgeStyle',
-          name: 'Estilo Visual do Badge',
-          description: 'Aparência do preenchimento e bordas do badge.',
-          defaultValue: 'subtle',
-          category: ['Badge / Status'],
-          settings: {
-            options: [
-              { value: 'subtle', label: 'Sutil (Fundo translúcido)' },
-              { value: 'solid', label: 'Sólido (Fundo preenchido)' },
-              { value: 'outline', label: 'Contorno (Apenas borda)' },
-            ],
-          },
-          showIf: (c, ctx) => isTableActive(c, ctx) && c?.cellDisplayMode === 'badge',
-        })
-
-        // ── 5. Propriedades Condicionais: Texto e Tipografia ──
-        .addSelect({
-          path: 'textFontSize',
-          name: 'Tamanho da Fonte',
-          defaultValue: '11.5px',
+        .addCustomEditor({
+          id: 'textConfig',
+          path: 'textConfig',
+          name: 'Aba Completa: Texto e Tipografia',
+          description: 'Traz todas as opções de Texto (tamanho da fonte, peso e cor por threshold) reunidas em uma única aba.',
+          editor: TextOverrideEditor,
+          override: TextOverrideEditor,
+          process: identityOverrideProcessor,
+          shouldApply: () => true,
+          hideFromDefaults: true,
           category: ['Texto'],
-          settings: {
-            options: [
-              { value: '10px', label: 'Pequeno (10px)' },
-              { value: '11.5px', label: 'Padrão (11.5px)' },
-              { value: '13px', label: 'Médio (13px)' },
-              { value: '15px', label: 'Grande (15px)' },
-            ],
-          },
-          showIf: (c, ctx) => isTableActive(c, ctx) && c?.cellDisplayMode === 'text',
+          showIf: isTableActive,
         })
-        .addSelect({
-          path: 'textWeight',
-          name: 'Peso da Fonte',
-          defaultValue: '500',
-          category: ['Texto'],
-          settings: {
-            options: [
-              { value: '400', label: 'Normal (400)' },
-              { value: '500', label: 'Médio (500)' },
-              { value: '600', label: 'Semi-Negrito (600)' },
-              { value: '700', label: 'Negrito (700)' },
-            ],
-          },
-          showIf: (c, ctx) => isTableActive(c, ctx) && c?.cellDisplayMode === 'text',
+        .addCustomEditor({
+          id: 'deltaConfig',
+          path: 'deltaConfig',
+          name: 'Aba Completa: Tendência Delta',
+          description: 'Traz todas as opções de Tendência Delta (exibição da diferença e modo de cor) reunidas em uma única aba.',
+          editor: DeltaOverrideEditor,
+          override: DeltaOverrideEditor,
+          process: identityOverrideProcessor,
+          shouldApply: () => true,
+          hideFromDefaults: true,
+          category: ['Tendência Delta'],
+          showIf: isTableActive,
         })
 
-        // ── 6. Propriedades Condicionais: Tendência Delta ──
+        // ── 3. Propriedades de Field Override para Calibração de Tendência / Delta ──
+        .addRadio({
+          path: 'deltaComparisonDirection',
+          name: 'Direção Crítica do Alarme',
+          description: 'Define qual sentido da variação representa agravamento e aproximação de risco operacional.',
+          defaultValue: 'gte',
+          category: ['Tendência Delta'],
+          settings: {
+            options: [
+              { value: 'gte', label: 'Quanto Maior, Pior (>=)' },
+              { value: 'lte', label: 'Quanto Menor, Pior (<=)' },
+            ],
+          },
+          showIf: (cfg) => cfg.cellDisplayMode === 'deltaTrend',
+        })
+        .addSelect({
+          path: 'deltaReferenceMode',
+          name: 'Cálculo de Referência (Base)',
+          description: 'Define a leitura base para medir a taxa de variação (delta).',
+          defaultValue: 'mean',
+          category: ['Tendência Delta'],
+          settings: {
+            options: [
+              { value: 'mean', label: 'Média da Janela' },
+              { value: 'first', label: 'Primeiro Valor' },
+              { value: 'prev', label: 'Leitura Anterior' },
+            ],
+          },
+          showIf: (cfg) => cfg.cellDisplayMode === 'deltaTrend',
+        })
+        .addSelect({
+          path: 'deltaValueFormat',
+          name: 'Formato do Valor da Tendência',
+          description: 'Escolha se a variação é exibida em percentual, valor absoluto ou ambos.',
+          defaultValue: 'percent',
+          category: ['Tendência Delta'],
+          settings: {
+            options: [
+              { value: 'percent', label: 'Percentual (%)' },
+              { value: 'absolute', label: 'Absoluto' },
+              { value: 'both', label: 'Ambos' },
+            ],
+          },
+          showIf: (cfg) => cfg.cellDisplayMode === 'deltaTrend',
+        })
+        .addSliderInput({
+          path: 'deltaProximityPct',
+          name: 'Zona de Proximidade (%)',
+          description: 'Margem percentual antes do limiar onde o alerta preventivo é acionado.',
+          defaultValue: 20,
+          category: ['Tendência Delta'],
+          settings: {
+            min: 5,
+            max: 50,
+            step: 1,
+          },
+          showIf: (cfg) => cfg.cellDisplayMode === 'deltaTrend',
+        })
+        .addSliderInput({
+          path: 'deltaDeadbandPct',
+          name: 'Zona Morta (%)',
+          description: 'Variações percentuais abaixo deste limite são tratadas como estáveis (●).',
+          defaultValue: 1,
+          category: ['Tendência Delta'],
+          settings: {
+            min: 0,
+            max: 10,
+            step: 0.5,
+          },
+          showIf: (cfg) => cfg.cellDisplayMode === 'deltaTrend',
+        })
         .addBooleanSwitch({
-          path: 'showDeltaValue',
-          name: 'Exibir Valor do Delta (Diferença)',
-          description: 'Mostra a diferença absoluta formatada em relação à média do período.',
+          path: 'deltaHighlightRelief',
+          name: 'Pintar Badge de Verde ao Recuar',
+          description: 'Sinaliza em verde suave quando a métrica recua ou se afasta do limiar de perigo.',
           defaultValue: true,
           category: ['Tendência Delta'],
-          showIf: (c, ctx) => isTableActive(c, ctx) && c?.cellDisplayMode === 'deltaTrend',
+          showIf: (cfg) => cfg.cellDisplayMode === 'deltaTrend',
         })
 
-        // ── 7. Overrides de Cabeçalho da Coluna ──
+        // ── 3. Overrides de Rótulo da Coluna / Métrica (Exclusivo em Overrides) ──
         .addTextInput({
           path: 'label',
           name: 'Rótulo Customizado',
-          description: 'Substitui o nome da query se preenchido',
+          description: 'Substitui o nome da métrica/coluna se preenchido.',
           defaultValue: '',
-          category: ['Cabeçalho'],
+          hideFromDefaults: true,
+          category: ['Exibição da Célula'],
           showIf: isTableActive,
         })
-        .addSelect({
-          path: 'icon',
-          name: 'Ícone da Métrica / Coluna',
-          description: 'Selecione o ícone para o cabeçalho desta coluna',
-          defaultValue: '',
-          category: ['Cabeçalho'],
-          settings: {
-            options: INDUSTRIAL_ICON_SELECT_OPTIONS,
-          },
+
+        // ── 4. Aba Completa de Alerta e Threshold (Exclusivo para Overrides via hideFromDefaults) ──
+        .addCustomEditor({
+          id: 'alertConfig',
+          path: 'alertConfig',
+          name: 'Aba Completa: Alerta e Pop-up (!)',
+          description: 'Traz todas as opções de threshold, modo de comparação, cores e pop-up (!) desta coluna reunidas em uma única aba.',
+          editor: AlertOverrideEditor,
+          override: AlertOverrideEditor,
+          process: identityOverrideProcessor,
+          shouldApply: () => true,
+          hideFromDefaults: true,
+          category: ['Alerta e Pop-up (!)'],
           showIf: isTableActive,
         });
     },
@@ -341,91 +332,36 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(TablePan
       .addRadio({
         path: 'panelMode',
         name: 'Modo do Painel',
-        description: 'Alterna entre a Tabela Dinâmica Multi-Colunas e o Mapa de Calor Temporal independente (ISA-101).',
+        description: 'Alterna entre os três modos de visualização disponíveis no plugin.',
         defaultValue: 'table',
         category: ['Modo do Painel'],
         settings: {
           options: [
             { value: 'table', label: 'Tabela Dinâmica' },
+            { value: 'singleHost', label: 'Tabela de Host Único' },
             { value: 'heatmap', label: 'Mapa de Calor (ISA-101)' },
           ],
         },
       })
 
       // ═══════════════════════════════════════════════════════════════════════
-      // 2. Categoria "Cabeçalho"
+      // 2. Categoria "Layout e Estilo" (Tabela Dinâmica)
       // ═══════════════════════════════════════════════════════════════════════
-      .addBooleanSwitch({
-        path: 'showHeatmapHeader',
-        name: 'Exibir Rótulo Superior',
-        description: 'Exibe ou oculta o rótulo superior do Mapa de Calor.',
-        defaultValue: true,
-        category: ['Cabeçalho'],
-        showIf: (c) => c.panelMode === 'heatmap',
-      })
-      .addTextInput({
-        path: 'heatmapCustomLabel',
-        name: 'Rótulo do Cabeçalho (Heatmap)',
-        description: 'Texto customizado para o rótulo superior do Mapa de Calor. Deixe em branco para usar o nome da métrica.',
-        defaultValue: '',
-        category: ['Cabeçalho'],
-        settings: {
-          placeholder: 'Nome da Métrica (Padrão)',
-        },
-        showIf: (c) => c.panelMode === 'heatmap',
-      })
-      .addTextInput({
-        path: 'heatmapCustomSubtitle',
-        name: 'Subtexto do Cabeçalho (Heatmap)',
-        description: 'Texto secundário opcional exibido abaixo do rótulo do Mapa de Calor.',
-        defaultValue: '',
-        category: ['Cabeçalho'],
-        settings: {
-          placeholder: 'Subtexto opcional...',
-        },
-        showIf: (c) => c.panelMode === 'heatmap',
-      })
       .addBooleanSwitch({
         path: 'showHeader',
         name: 'Exibir Cabeçalho da Tabela',
         description: 'Exibe ou oculta a linha de cabeçalho com os nomes das colunas.',
         defaultValue: true,
-        category: ['Cabeçalho'],
+        category: ['Layout e Estilo'],
         showIf: (c) => (c.panelMode ?? 'table') === 'table',
       })
-      .addTextInput({
-        path: 'singleHostCustomLabel',
-        name: 'Rótulo do Host Único',
-        description: 'Texto do título no topo da visualização de host único. Deixe em branco para usar o nome do host por padrão.',
-        defaultValue: '',
-        category: ['Cabeçalho'],
-        settings: {
-          placeholder: 'Nome do Host (Padrão)',
-        },
-        showIf: (c) => (c.panelMode ?? 'table') === 'table',
-      })
-      .addTextInput({
-        path: 'singleHostCustomStatusText',
-        name: 'Subtexto do Host Único',
-        description: 'Subtexto exibido abaixo do título do host único. Deixe em branco para usar o status automático (Operacional / Em Alerta).',
-        defaultValue: '',
-        category: ['Cabeçalho'],
-        settings: {
-          placeholder: 'Operacional / Em Alerta (Padrão)',
-        },
-        showIf: (c) => (c.panelMode ?? 'table') === 'table',
-      })
-
-      // ═══════════════════════════════════════════════════════════════════════
-      // 3. Categoria "Layout e Estilo" (showIf: c => c.panelMode === 'table')
-      // ═══════════════════════════════════════════════════════════════════════
       .addNumberInput({
         path: 'rowHeight',
         name: 'Altura da Linha (px)',
         description: 'Altura em pixels de cada linha da tabela (padrão: 34px).',
         defaultValue: 34,
         category: ['Layout e Estilo'],
-        settings: { min: 24, max: 80, step: 2 },
+        settings: { min: 20, max: 250, step: 2 },
         showIf: (c) => (c.panelMode ?? 'table') === 'table',
       })
       .addBooleanSwitch({
@@ -436,17 +372,9 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(TablePan
         category: ['Layout e Estilo'],
         showIf: (c) => (c.panelMode ?? 'table') === 'table',
       })
-      .addBooleanSwitch({
-        path: 'showWindowDiagnosisColumn',
-        name: 'Coluna de Diagnóstico na Janela',
-        description: 'Exibe o tempo no estado atual e resumo de oscilações calculados sobre a janela de tempo.',
-        defaultValue: true,
-        category: ['Layout e Estilo'],
-        showIf: (c) => (c.panelMode ?? 'table') === 'table',
-      })
 
       // ═══════════════════════════════════════════════════════════════════════
-      // 3. Categoria "Coluna de Host e Ícones"
+      // 3. Categoria "Coluna de Host e Ícones" (Tabela Dinâmica)
       // ═══════════════════════════════════════════════════════════════════════
       .addBooleanSwitch({
         path: 'showHostIcon',
@@ -454,6 +382,7 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(TablePan
         description: 'Exibe o ícone do ativo na primeira coluna da tabela.',
         defaultValue: true,
         category: ['Coluna de Host e Ícones'],
+        showIf: (c) => (c.panelMode ?? 'table') === 'table',
       })
       .addSelect({
         path: 'hostIconName',
@@ -464,7 +393,7 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(TablePan
         settings: {
           options: INDUSTRIAL_ICON_SELECT_OPTIONS,
         },
-        showIf: (c) => c.showHostIcon !== false,
+        showIf: (c) => (c.panelMode ?? 'table') === 'table' && c.showHostIcon !== false,
       })
       .addRadio({
         path: 'hostIconBgMode',
@@ -478,7 +407,7 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(TablePan
             { value: 'clean', label: 'Livre (Clean)' },
           ],
         },
-        showIf: (c) => c.showHostIcon !== false,
+        showIf: (c) => (c.panelMode ?? 'table') === 'table' && c.showHostIcon !== false,
       })
       .addBooleanSwitch({
         path: 'enableHostFilter',
@@ -488,37 +417,184 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(TablePan
         category: ['Coluna de Host e Ícones'],
         showIf: (c) => (c.panelMode ?? 'table') === 'table' && c.showHostIcon !== false,
       })
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // 4. Categorias para Tabela de Host Único (panelMode === 'singleHost')
+      // ═══════════════════════════════════════════════════════════════════════
+      .addNumberInput({
+        path: 'singleHostRowHeight',
+        name: 'Altura da Linha de Métrica (px)',
+        description: 'Altura em pixels de cada linha de métrica no modo Host Único (padrão: 34px).',
+        defaultValue: 34,
+        category: ['Layout e Estilo'],
+        settings: { min: 20, max: 250, step: 2 },
+        showIf: (c) => c.panelMode === 'singleHost',
+      })
+      .addBooleanSwitch({
+        path: 'singleHostEnableZebra',
+        name: 'Zebrado Corporativo',
+        description: 'Aplica gradiente sutil micro-luminoso nas linhas pares para facilitar a leitura.',
+        defaultValue: true,
+        category: ['Layout e Estilo'],
+        showIf: (c) => c.panelMode === 'singleHost',
+      })
+      .addBooleanSwitch({
+        path: 'singleHostShowMetricIcon',
+        name: 'Exibir Ícone das Métricas',
+        description: 'Exibe ícone ao lado do nome de cada métrica no modo de Host Único.',
+        defaultValue: true,
+        category: ['Ícone do Host Único'],
+        showIf: (c) => c.panelMode === 'singleHost',
+      })
+      .addSelect({
+        path: 'singleHostMetricIcon',
+        name: 'Ícone Padrão das Métricas',
+        description: 'Ícone padrão exibido para as métricas no modo de Host Único.',
+        defaultValue: 'server',
+        category: ['Ícone do Host Único'],
+        settings: {
+          options: INDUSTRIAL_ICON_SELECT_OPTIONS,
+        },
+        showIf: (c) => c.panelMode === 'singleHost' && c.singleHostShowMetricIcon !== false,
+      })
+      .addRadio({
+        path: 'singleHostMetricIconBgMode',
+        name: 'Estilo do Ícone da Métrica',
+        description: 'Formato visual do ícone da métrica no modo Host Único: vitrificado ou livre.',
+        defaultValue: 'contained',
+        category: ['Ícone do Host Único'],
+        settings: {
+          options: [
+            { value: 'contained', label: 'Com Fundo Vitrificado (Contained)' },
+            { value: 'clean', label: 'Livre (Clean)' },
+          ],
+        },
+        showIf: (c) => c.panelMode === 'singleHost' && c.singleHostShowMetricIcon !== false,
+      })
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // 5. Categoria "Alerta e Pop-up (!)" (Tabela Dinâmica e Host Único)
+      // ═══════════════════════════════════════════════════════════════════════
+      .addSelect({
+        path: 'thresholdComparisonMode',
+        name: 'Modo de Comparação do Threshold',
+        description: 'Define como os limites de threshold são avaliados globalmente: Maior ou Igual (>=), Exatamente Igual (==) ou Menor ou Igual (<=).',
+        defaultValue: 'gte',
+        category: ['Alerta e Pop-up (!)'],
+        settings: {
+          options: [
+            { value: 'gte', label: 'Maior ou Igual (>=) [Padrão]' },
+            { value: 'eq', label: 'Exatamente Igual (==) [Binário / Status]' },
+            { value: 'lte', label: 'Menor ou Igual (<=)' },
+          ],
+        },
+        showIf: (c) => (c.panelMode ?? 'table') === 'table' || c.panelMode === 'singleHost',
+      })
+      .addBooleanSwitch({
+        path: 'useThresholdColors',
+        name: 'Colorir Métrica pelo Threshold',
+        description: 'Aplica cores de threshold no texto e status de todas as métricas que não tiverem override.',
+        defaultValue: false,
+        category: ['Alerta e Pop-up (!)'],
+        showIf: (c) => (c.panelMode ?? 'table') === 'table' || c.panelMode === 'singleHost',
+      })
       .addBooleanSwitch({
         path: 'colorHostIconByThreshold',
         name: 'Colorir Ícone pelo Threshold',
-        description: 'Quando ativado, o ícone do host assume a cor do threshold ou alerta ativo. Desativado, mantém a cor padrão neutra (cinza/branco).',
+        description: 'Quando ativado, o ícone do host assume a cor do threshold ativo da linha.',
         defaultValue: false,
-        category: ['Coluna de Host e Ícones'],
-        showIf: (c) => c.showHostIcon !== false,
-      })
-
-      // ═══════════════════════════════════════════════════════════════════════
-      // Categoria "Visualização de Host Único" (showIf: c => c.panelMode === 'table')
-      // ═══════════════════════════════════════════════════════════════════════
-      .addSelect({
-        path: 'singleHostLayout',
-        name: 'Modo de Ativação',
-        description: 'Define quando ativar a visualização em lista chave-valor para host único.',
-        defaultValue: 'auto',
-        category: ['Visualização de Host Único'],
-        settings: {
-          options: [
-            { value: 'auto', label: 'Automático (Ativa se houver 1 Host)' },
-            { value: 'keyvalue', label: 'Sempre Ativo (Forçar Host Único)' },
-            { value: 'table', label: 'Desativado (Manter Sempre Tabela)' },
-          ],
-        },
+        category: ['Alerta e Pop-up (!)'],
         showIf: (c) => (c.panelMode ?? 'table') === 'table',
       })
+      .addBooleanSwitch({
+        path: 'singleHostColorMetricIconByThreshold',
+        name: 'Colorir Ícone pelo Threshold',
+        description: 'Quando ativado, os ícones das métricas assumem a cor do threshold ativo.',
+        defaultValue: false,
+        category: ['Alerta e Pop-up (!)'],
+        showIf: (c) => c.panelMode === 'singleHost',
+      })
+      .addBooleanSwitch({
+        path: 'sparklineFollowThreshold',
+        name: 'Colorir Linha pelo Threshold',
+        description: 'Aplica a cor do threshold ativo à linha e área do gráfico (global para colunas em modo gráfico).',
+        defaultValue: false,
+        category: ['Alerta e Pop-up (!)'],
+        showIf: (c) => (c.panelMode ?? 'table') === 'table' || c.panelMode === 'singleHost',
+      })
+      .addBooleanSwitch({
+        path: 'binaryStepHighlight',
+        name: 'Colorir Cada Parte da Linha pelo Threshold',
+        description: 'Destaca no gráfico cada período/trecho em que houve violação de threshold com a respectiva cor de alerta.',
+        defaultValue: false,
+        category: ['Alerta e Pop-up (!)'],
+        showIf: (c) => (c.panelMode ?? 'table') === 'table' || c.panelMode === 'singleHost',
+      })
+      .addBooleanSwitch({
+        path: 'enableAlertPopup',
+        name: 'Habilitar Botão / Pop-up de Alerta (!)',
+        description: 'Exibe o botão interativo de alerta com histórico de episódios ao lado do host / métrica quando houver violação.',
+        defaultValue: true,
+        category: ['Alerta e Pop-up (!)'],
+        showIf: (c) => (c.panelMode ?? 'table') === 'table' || c.panelMode === 'singleHost' || c.panelMode === 'heatmap',
+      })
+      .addSelect({
+        path: 'alertPopupDisplayMode',
+        name: 'Modo de Exibição do Botão (!)',
+        description: 'Define quando exibir o botão (!): Em qualquer alerta (ativo ou histórico na janela) ou apenas quando em alerta ativo no momento.',
+        defaultValue: 'always',
+        category: ['Alerta e Pop-up (!)'],
+        settings: {
+          options: [
+            { value: 'always', label: 'Em qualquer alerta (Ativo ou Histórico na Janela)' },
+            { value: 'alertOnly', label: 'Apenas quando em alerta ativo' },
+          ],
+        },
+        showIf: (c) => ((c.panelMode ?? 'table') === 'table' || c.panelMode === 'singleHost' || c.panelMode === 'heatmap') && c.enableAlertPopup !== false,
+      })
+      .addSelect({
+        path: 'disconnectThreshold',
+        name: 'Limite de Desconexão / Lacuna no Pop-up',
+        description: 'Tempo de inatividade sem dados antes de interromper episódios no histórico do pop-up.',
+        defaultValue: 'auto',
+        category: ['Alerta e Pop-up (!)'],
+        settings: {
+          options: [
+            { value: 'auto', label: 'Automático (3x intervalo da série)' },
+            { value: '1m', label: '1 minuto' },
+            { value: '2m', label: '2 minutos' },
+            { value: '5m', label: '5 minutos' },
+            { value: '15m', label: '15 minutos' },
+            { value: '30m', label: '30 minutos' },
+            { value: '1h', label: '1 hora' },
+            { value: 'never', label: 'Nunca desconectar' },
+          ],
+        },
+        showIf: (c) => ((c.panelMode ?? 'table') === 'table' || c.panelMode === 'singleHost' || c.panelMode === 'heatmap') && c.enableAlertPopup !== false,
+      })
 
       // ═══════════════════════════════════════════════════════════════════════
-      // 4. Categoria "Mapa de Calor" (showIf: c => c.panelMode === 'heatmap')
+      // 4. Categoria "Mapa de Calor"  (showIf: c => c.panelMode === 'heatmap')
       // ═══════════════════════════════════════════════════════════════════════
+      .addBooleanSwitch({
+        path: 'showHeatmapHeader',
+        name: 'Exibir Rótulo Superior',
+        description: 'Exibe ou oculta o rótulo superior do Mapa de Calor.',
+        defaultValue: true,
+        category: ['Mapa de Calor'],
+        showIf: (c) => c.panelMode === 'heatmap',
+      })
+      .addTextInput({
+        path: 'heatmapCustomLabel',
+        name: 'Rótulo do Cabeçalho (Heatmap)',
+        description: 'Texto customizado para o rótulo superior do Mapa de Calor. Deixe em branco para usar o nome da métrica.',
+        defaultValue: '',
+        category: ['Mapa de Calor'],
+        settings: {
+          placeholder: 'Nome da Métrica (Padrão)',
+        },
+        showIf: (c) => c.panelMode === 'heatmap',
+      })
       .addNumberInput({
         path: 'heatmapBuckets',
         name: 'Quantidade de Blocos (N)',
@@ -559,34 +635,6 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(TablePan
         defaultValue: 180,
         category: ['Mapa de Calor'],
         settings: { min: 80, max: 400, step: 10 },
-        showIf: (c) => c.panelMode === 'heatmap',
-      })
-      .addBooleanSwitch({
-        path: 'enableAlertPopup',
-        name: 'Habilitar Botão / Pop-up de Alerta (!)',
-        description: 'Exibe o botão interativo de alerta (!) com histórico de episódios ao lado do nome do host no mapa de calor quando houver violação.',
-        defaultValue: true,
-        category: ['Mapa de Calor'],
-        showIf: (c) => c.panelMode === 'heatmap',
-      })
-      .addSelect({
-        path: 'disconnectThreshold',
-        name: 'Limite de Desconexão / Lacuna no Pop-up',
-        description: 'Tempo de inatividade sem dados antes de interromper episódios no histórico do pop-up.',
-        defaultValue: 'auto',
-        category: ['Mapa de Calor'],
-        settings: {
-          options: [
-            { value: 'auto', label: 'Automático (3x intervalo da série)' },
-            { value: '1m', label: '1 minuto' },
-            { value: '2m', label: '2 minutos' },
-            { value: '5m', label: '5 minutos' },
-            { value: '15m', label: '15 minutos' },
-            { value: '30m', label: '30 minutos' },
-            { value: '1h', label: '1 hora' },
-            { value: 'never', label: 'Nunca desconectar' },
-          ],
-        },
         showIf: (c) => c.panelMode === 'heatmap',
       });
   });

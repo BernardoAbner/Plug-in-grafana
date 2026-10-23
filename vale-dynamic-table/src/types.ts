@@ -112,6 +112,7 @@ export type NativeUnit =
 // ─── Thresholds nativos ────────────────────────────────────────────────────
 
 export type ThresholdsModeNative = 'absolute' | 'percentage';
+export type ThresholdComparisonMode = 'gte' | 'eq' | 'lte';
 
 export interface ThresholdStep {
   /** Valor a partir do qual este step entra em vigor.
@@ -187,7 +188,73 @@ export type CellDisplayMode =
   | 'timeseries'
   | 'heatmap';
 
+// ─── Pacotes Compostos de Override Properties (Aba Inteira por Modo) ───────
+
+export interface TimeSeriesOverrideConfig {
+  timeSeriesValueMode?: TimeSeriesValueMode;
+  lineInterpolation?: LineInterpolation;
+  lineWidth?: number;
+  sparklineLineOpacity?: number;
+  areaOpacity?: number;
+  sparklineHeight?: number;
+  lineColor?: string;
+  sparklineFollowThreshold?: boolean;
+  binaryStepHighlight?: boolean;
+}
+
+export interface BadgeOverrideConfig {
+  badgeSize?: BadgeSize;
+  badgeStyle?: BadgeVisual;
+  useThresholdColors?: boolean;
+}
+
+export interface ProgressOverrideConfig {
+  barType?: 'progressBar' | 'segmentedBar';
+  progressMin?: number;
+  progressMax?: number;
+  progressHeight?: ProgressHeight;
+  showProgressValue?: boolean;
+  lineColor?: string;
+  useThresholdColors?: boolean;
+}
+
+export interface TextOverrideConfig {
+  textFontSize?: string;
+  textWeight?: string;
+  useThresholdColors?: boolean;
+}
+
+export type DeltaValueFormat = 'percent' | 'absolute' | 'both';
+
+export interface DeltaOverrideConfig {
+  showDeltaValue?: boolean;
+  deltaTrendColorMode?: 'proximity' | 'direction' | 'threshold' | 'neutral';
+  deltaProximityMargin?: number;
+  deltaReferenceMode?: 'mean' | 'first' | 'prev';
+  deltaValueFormat?: DeltaValueFormat;
+  deltaDeadbandPct?: number;
+  deltaProximityPct?: number;
+  deltaComparisonDirection?: ThresholdComparisonMode;
+  deltaHighlightRelief?: boolean;
+  useThresholdColors?: boolean;
+}
+
+export interface AlertOverrideConfig {
+  thresholdComparisonMode?: ThresholdComparisonMode;
+  useThresholdColors?: boolean;
+  colorIconByThreshold?: boolean;
+  enableAlertPopup?: boolean;
+  alertPopupDisplayMode?: 'always' | 'alertOnly';
+}
+
 export interface CustomFieldConfig {
+  // Pacotes compostos de Override (Opção 1)
+  timeSeriesConfig?: TimeSeriesOverrideConfig;
+  badgeConfig?: BadgeOverrideConfig;
+  progressConfig?: ProgressOverrideConfig;
+  textConfig?: TextOverrideConfig;
+  deltaConfig?: DeltaOverrideConfig;
+  alertConfig?: AlertOverrideConfig;
   // Thresholds nativos
   nativeThresholds?: NativeThresholdsConfig;
   // Mapeamentos de valor (sistema completo)
@@ -198,7 +265,9 @@ export interface CustomFieldConfig {
   statusDisplayMode?: StatusDisplayType;
   // Propriedades gerais
   useThresholdColors?: boolean;
+  thresholdComparisonMode?: ThresholdComparisonMode;
   enableAlertPopup?: boolean;
+  alertPopupDisplayMode?: 'always' | 'alertOnly';
   enableColumnFilter?: boolean;
   // Propriedades de texto
   textFontSize?: string;
@@ -213,8 +282,20 @@ export interface CustomFieldConfig {
   progressHeight?: ProgressHeight;
   // Propriedades de deltaTrend
   showDeltaValue?: boolean;
+  deltaTrendColorMode?: 'proximity' | 'direction' | 'threshold' | 'neutral';
+  deltaProximityMargin?: number;
+  deltaReferenceMode?: 'mean' | 'first' | 'prev';
+  deltaValueFormat?: DeltaValueFormat;
+  deltaDeadbandPct?: number;
+  deltaProximityPct?: number;
+  deltaComparisonDirection?: ThresholdComparisonMode;
+  deltaHighlightRelief?: boolean;
   // Propriedades de sparkline (Time Series)
   timeSeriesValueMode?: TimeSeriesValueMode;
+  sparklineFollowThreshold?: boolean;
+  sparklineLineOpacity?: number;   // 10–100 (%)
+  sparklineFillOpacity?: number;   // 0–100 (%)
+  binaryStepHighlight?: boolean;
   lineWidth?: number;
   areaOpacity?: number;            // 0–100, convertido para 0–1 na renderização
   lineColor?: string;
@@ -228,6 +309,8 @@ export interface CustomFieldConfig {
   barMode?: BarMode;
   showThresholdBands?: boolean;
   disconnectThreshold?: DisconnectThresholdMode;
+  showXAxis?: boolean;
+  sparklineHeight?: number;
   // Específicos do cabeçalho e ícones
   icon?: string;
   label?: string;
@@ -248,7 +331,7 @@ export interface CustomFieldConfig {
 /** Opções de painel — configuradas na aba de opções do Grafana */
 export interface SimpleOptions {
   // ── Modo do Painel ──
-  panelMode?: 'table' | 'heatmap';
+  panelMode?: 'table' | 'singleHost' | 'heatmap';
 
   // ── Layout e Estilo (Tabela) ──
   rowHeight?: number;
@@ -256,16 +339,29 @@ export interface SimpleOptions {
   showFilterBar?: boolean;
   enableZebra?: boolean;
   showWindowDiagnosisColumn?: boolean;
-  singleHostLayout?: 'auto' | 'keyvalue' | 'table';
   singleHostCustomLabel?: string;
   singleHostCustomStatusText?: string;
   enableHostFilter?: boolean;
 
-  // ── Coluna de Host e Ícones ──
+  // ── Coluna de Host e Ícones (Tabela Comum) ──
   showHostIcon?: boolean;
   hostIconName?: string;
   hostIconBgMode?: 'contained' | 'clean';
   colorHostIconByThreshold?: boolean;
+
+  // ── Modo Tabela Host Único ──
+  singleHostShowMetricIcon?: boolean;
+  singleHostMetricIcon?: string;
+  singleHostMetricIconBgMode?: 'contained' | 'clean';
+  singleHostColorMetricIconByThreshold?: boolean;
+  singleHostRowHeight?: number;
+  singleHostEnableZebra?: boolean;
+
+  // ── Modo Mapa de Calor (Ícones) ──
+  heatmapShowHostIcon?: boolean;
+  heatmapHostIconName?: string;
+  heatmapHostIconBgMode?: 'contained' | 'clean';
+  heatmapColorHostIconByThreshold?: boolean;
 
   // ── Mapa de Calor ──
   heatmapBuckets?: number;
@@ -278,14 +374,21 @@ export interface SimpleOptions {
   showHeatmapHeader?: boolean;
   heatmapCustomLabel?: string;
   heatmapCustomSubtitle?: string;
+  heatmapHostLabel?: string;
 
   // ── Configurações padrão de célula (fallback) ──
   cellDisplayMode?: CellDisplayMode;
   displayMode?: string;
   statusDisplayMode?: StatusDisplayType;
   useThresholdColors?: boolean;
+  thresholdComparisonMode?: ThresholdComparisonMode;
   enableAlertPopup?: boolean;
+  alertPopupDisplayMode?: 'always' | 'alertOnly';
   timeSeriesValueMode?: TimeSeriesValueMode;
+  sparklineFollowThreshold?: boolean;
+  sparklineLineOpacity?: number;
+  sparklineFillOpacity?: number;
+  binaryStepHighlight?: boolean;
   disconnectThreshold?: DisconnectThresholdMode;
 
   // ── Campos legados mantidos para compatibilidade de schema ──
