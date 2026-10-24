@@ -128,3 +128,38 @@ test('matchMetric resolves metric when host prefix is added or removed across ti
   expect(matched).toBeDefined();
   expect(matched?.field.values[0]).toBe(20);
 });
+
+test('matchMetric does NOT hijack another metric in the same refId when the saved metric is missing in the time range', () => {
+  const savedMemorySource = {
+    refId: 'A',
+    frameName: 'Memory pages per second',
+    frameOccurrence: 0,
+    fieldName: 'Value',
+    fieldOccurrence: 0,
+  };
+
+  // No intervalo de tempo filtrado, apenas "Uptime" e "ICMP ping" retornaram na query A
+  const partialRangeData = [
+    toDataFrame({
+      refId: 'A',
+      name: 'Uptime',
+      fields: [
+        { name: 'time', type: FieldType.time, values: [1] },
+        { name: 'Value', type: FieldType.number, values: [1599] },
+      ],
+    }),
+    toDataFrame({
+      refId: 'A',
+      name: 'ICMP ping',
+      fields: [
+        { name: 'time', type: FieldType.time, values: [1] },
+        { name: 'Value', type: FieldType.number, values: [0] },
+      ],
+    }),
+  ];
+
+  const available = listMetrics(partialRangeData);
+  const matched = matchMetric(available, savedMemorySource);
+
+  expect(matched).toBeUndefined();
+});

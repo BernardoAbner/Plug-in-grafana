@@ -179,34 +179,41 @@ export function matchMetric(available: AvailableMetric[], savedSource?: MetricSo
       item.label === savedSource.frameName || (savedSource.frameName ? item.label.includes(savedSource.frameName) : false)
     );
     if (byLabel) return byLabel;
+
+    // Se a métrica salva possui um frameName específico (ou nome canônico identificado),
+    // NÃO devemos cair em fallbacks genéricos por refId/fieldName ("Value"), pois em queries
+    // multi-frame (ex: Zabbix com regex /.*/ na mesma query refId="A"), se a métrica ausentar
+    // no período selecionado, o fallback genérico capturaria outra métrica qualquer (ex: Uptime).
+    return undefined;
   }
 
-  // 5. Match por refId + fieldName equivalente na mesma ocorrência
+  // Se havia nomes candidatos (ex: fieldName específico não-genérico como "CPU") e nenhum
+  // frame/field bateu nos passos 1 a 3, não substitui por outra métrica da mesma query.
+  if (savedNames.length > 0) {
+    return undefined;
+  }
+
+  // 5. Match por refId + fieldName equivalente na mesma ocorrência (apenas quando sem frameName específico)
   if (savedSource.refId) {
     const byRefAndField = available.find(item => 
       item.source.refId === savedSource.refId && 
       (item.source.fieldName === savedSource.fieldName || areEquivalentFieldNames(item.source.fieldName, savedSource.fieldName)) &&
-      item.source.frameOccurrence === savedSource.frameOccurrence
+      item.source.frameOccurrence === savedSource.frameOccurrence &&
+      !item.source.frameName && !item.frame.name
     );
     if (byRefAndField) return byRefAndField;
   }
 
-  // 6. Fallback resiliente: Match por refId e fieldName equivalente
-  const byRefAndField = available.find(item => 
-    item.source.refId === savedSource.refId && 
-    (item.source.fieldName === savedSource.fieldName || areEquivalentFieldNames(item.source.fieldName, savedSource.fieldName))
-  );
-  if (byRefAndField) return byRefAndField;
-
-  // 7. Fallback final: Match por refId se a query contiver apenas uma métrica
+  // 6. Fallback final: apenas se nem a métrica salva nem os candidatos possuírem nome identificador
   if (savedSource.refId) {
-    const sameRef = available.filter(item => item.source.refId === savedSource.refId);
-    if (sameRef.length === 1) {
-      return sameRef[0];
+    const unnamedSameRef = available.filter(
+      item => item.source.refId === savedSource.refId && !item.source.frameName && !item.frame.name
+    );
+    if (unnamedSameRef.length === 1) {
+      return unnamedSameRef[0];
     }
-    const byOccur = sameRef.find(item => item.source.frameOccurrence === savedSource.frameOccurrence);
+    const byOccur = unnamedSameRef.find(item => item.source.frameOccurrence === savedSource.frameOccurrence);
     if (byOccur) return byOccur;
-    if (sameRef.length > 0) return sameRef[0];
   }
 
   return undefined;

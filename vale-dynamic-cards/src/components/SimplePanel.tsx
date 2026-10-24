@@ -723,7 +723,7 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
 
     if (!metric?.field) {
       return {
-        label: label || source?.fieldName || 'STATUS',
+        label: label || source?.frameName || source?.fieldName || 'STATUS',
         text: 'SEM DADOS',
         color: noDataColor,
       };
@@ -734,7 +734,7 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
 
     if (healthy === undefined) {
       return {
-        label: label || metric.label || source?.fieldName || 'STATUS',
+        label: label || metric.label || source?.frameName || source?.fieldName || 'STATUS',
         text: 'SEM DADOS',
         color: noDataColor,
       };
@@ -743,7 +743,7 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
     const display = formatFieldValue(raw, metric.field, theme);
     const exceededColor = getExceededColor(metric.field, display.color, theme);
     const statusColor = exceededColor || (display.color ? resolveColor(theme, display.color, accent) : accent);
-    const finalLabel = label || metric.label || source?.fieldName || 'STATUS';
+    const finalLabel = label || metric.label || source?.frameName || source?.fieldName || 'STATUS';
 
     return {
       label: finalLabel,
@@ -820,7 +820,11 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
         
         const displayData = extractMetricDisplay(childSource as MetricSource | undefined);
         const childMetric = matchMetric(availableMetrics, childSource as MetricSource | undefined);
-        let defaultLabel = childMetric?.label || (childSource as MetricSource | undefined)?.fieldName || 'Sem Nome';
+        let defaultLabel =
+          childMetric?.label ||
+          (childSource as MetricSource | undefined)?.frameName ||
+          (childSource as MetricSource | undefined)?.fieldName ||
+          'Sem Nome';
         if (defaultLabel.toLowerCase() === 'value' || defaultLabel.toLowerCase() === 'valor') {
           defaultLabel = childMetric?.frame?.name || (childSource as MetricSource | undefined)?.frameName || defaultLabel;
         }
@@ -1197,7 +1201,7 @@ export const SimplePanel: React.FC<Props> = ({ options, data, width, height, fie
             const field = metric?.field;
             const lastValue = getLastNonNullValue(field);
             const display = field ? formatFieldValue(lastValue, field, theme) : { text: '—', color: undefined };
-            const label = config.label || metric?.label || config.source?.fieldName || 'Métrica';
+            const label = config.label || metric?.label || config.source?.frameName || config.source?.fieldName || 'Métrica';
             const customCfg = (field?.config?.custom as CustomFieldConfig) || {};
             const useThreshold = options.metricsFollowThreshold ?? false;
             const shouldShowIcon = customCfg?.showIcon ?? options.showIcon ?? true;

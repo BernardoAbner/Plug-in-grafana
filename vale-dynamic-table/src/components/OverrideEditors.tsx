@@ -13,6 +13,7 @@ import {
   BadgeSize,
   BadgeVisual,
   ProgressHeight,
+  ProgressColorMode,
   ThresholdComparisonMode,
   DeltaValueFormat,
 } from '../types';
@@ -528,6 +529,11 @@ const PROGRESS_HEIGHT_OPTIONS: Array<SelectableValue<ProgressHeight>> = [
   { value: '12px', label: 'Alta (12px)' },
 ];
 
+const PROGRESS_COLOR_MODE_OPTIONS: Array<SelectableValue<ProgressColorMode>> = [
+  { value: 'gradient', label: 'Gradual (Gradiente)' },
+  { value: 'threshold', label: 'Toda a Barra (Threshold Atual)' },
+];
+
 export const ProgressOverrideEditor: React.FC<StandardEditorProps<ProgressOverrideConfig>> = ({
   value,
   onChange,
@@ -617,6 +623,20 @@ export const ProgressOverrideEditor: React.FC<StandardEditorProps<ProgressOverri
         />
       </div>
 
+      {(cfg.showProgressValue ?? true) && (
+        <div style={rowStyle}>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            <span style={getLabelStyle(isDark)}>Colorir Valor Numérico pelo Threshold</span>
+            <span style={getDescStyle(isDark)}>Aplica a cor do threshold ativo também ao texto numérico ao lado da barra</span>
+          </div>
+          <OverrideToggle
+            checked={Boolean(cfg.colorValueByThreshold)}
+            onChange={(checked) => update({ colorValueByThreshold: checked })}
+            accentColor={VALE_DEFAULT_ACCENT}
+          />
+        </div>
+      )}
+
       <div style={rowStyle}>
         <div style={{ display: 'flex', flexDirection: 'column' }}>
           <span style={getLabelStyle(isDark)}>Colorir pelo Threshold</span>
@@ -628,6 +648,20 @@ export const ProgressOverrideEditor: React.FC<StandardEditorProps<ProgressOverri
           accentColor={VALE_DEFAULT_ACCENT}
         />
       </div>
+
+      {Boolean(cfg.useThresholdColors) && (
+        <div style={colStyle}>
+          <span style={getLabelStyle(isDark)}>Modo de Cor do Preenchimento</span>
+          <span style={getDescStyle(isDark)}>Escolha entre degradê gradual pela escala ou preencher a barra toda com a cor do threshold ativo</span>
+          <RadioButtonGroup
+            options={PROGRESS_COLOR_MODE_OPTIONS}
+            value={cfg.progressColorMode ?? 'gradient'}
+            onChange={(v) => update({ progressColorMode: v })}
+            size="sm"
+            fullWidth
+          />
+        </div>
+      )}
     </div>
   );
 };

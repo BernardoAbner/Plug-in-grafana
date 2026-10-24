@@ -1,6 +1,6 @@
 {
   "name": "vale-time-series",
-  "version": "1.0.1792202944",
+  "version": "1.0.1792852868",
   "scripts": {
     "build": "webpack -c ./.config/webpack/webpack.config.ts --env production",
     "dev": "webpack -w -c ./.config/webpack/webpack.config.ts --env development",

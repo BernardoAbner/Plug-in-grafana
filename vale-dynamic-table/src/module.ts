@@ -217,86 +217,6 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(TablePan
           showIf: isTableActive,
         })
 
-        // ── 3. Propriedades de Field Override para Calibração de Tendência / Delta ──
-        .addRadio({
-          path: 'deltaComparisonDirection',
-          name: 'Direção Crítica do Alarme',
-          description: 'Define qual sentido da variação representa agravamento e aproximação de risco operacional.',
-          defaultValue: 'gte',
-          category: ['Tendência Delta'],
-          settings: {
-            options: [
-              { value: 'gte', label: 'Quanto Maior, Pior (>=)' },
-              { value: 'lte', label: 'Quanto Menor, Pior (<=)' },
-            ],
-          },
-          showIf: (cfg) => cfg.cellDisplayMode === 'deltaTrend',
-        })
-        .addSelect({
-          path: 'deltaReferenceMode',
-          name: 'Cálculo de Referência (Base)',
-          description: 'Define a leitura base para medir a taxa de variação (delta).',
-          defaultValue: 'mean',
-          category: ['Tendência Delta'],
-          settings: {
-            options: [
-              { value: 'mean', label: 'Média da Janela' },
-              { value: 'first', label: 'Primeiro Valor' },
-              { value: 'prev', label: 'Leitura Anterior' },
-            ],
-          },
-          showIf: (cfg) => cfg.cellDisplayMode === 'deltaTrend',
-        })
-        .addSelect({
-          path: 'deltaValueFormat',
-          name: 'Formato do Valor da Tendência',
-          description: 'Escolha se a variação é exibida em percentual, valor absoluto ou ambos.',
-          defaultValue: 'percent',
-          category: ['Tendência Delta'],
-          settings: {
-            options: [
-              { value: 'percent', label: 'Percentual (%)' },
-              { value: 'absolute', label: 'Absoluto' },
-              { value: 'both', label: 'Ambos' },
-            ],
-          },
-          showIf: (cfg) => cfg.cellDisplayMode === 'deltaTrend',
-        })
-        .addSliderInput({
-          path: 'deltaProximityPct',
-          name: 'Zona de Proximidade (%)',
-          description: 'Margem percentual antes do limiar onde o alerta preventivo é acionado.',
-          defaultValue: 20,
-          category: ['Tendência Delta'],
-          settings: {
-            min: 5,
-            max: 50,
-            step: 1,
-          },
-          showIf: (cfg) => cfg.cellDisplayMode === 'deltaTrend',
-        })
-        .addSliderInput({
-          path: 'deltaDeadbandPct',
-          name: 'Zona Morta (%)',
-          description: 'Variações percentuais abaixo deste limite são tratadas como estáveis (●).',
-          defaultValue: 1,
-          category: ['Tendência Delta'],
-          settings: {
-            min: 0,
-            max: 10,
-            step: 0.5,
-          },
-          showIf: (cfg) => cfg.cellDisplayMode === 'deltaTrend',
-        })
-        .addBooleanSwitch({
-          path: 'deltaHighlightRelief',
-          name: 'Pintar Badge de Verde ao Recuar',
-          description: 'Sinaliza em verde suave quando a métrica recua ou se afasta do limiar de perigo.',
-          defaultValue: true,
-          category: ['Tendência Delta'],
-          showIf: (cfg) => cfg.cellDisplayMode === 'deltaTrend',
-        })
-
         // ── 3. Overrides de Rótulo da Coluna / Métrica (Exclusivo em Overrides) ──
         .addTextInput({
           path: 'label',
@@ -494,6 +414,28 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(TablePan
         path: 'useThresholdColors',
         name: 'Colorir Métrica pelo Threshold',
         description: 'Aplica cores de threshold no texto e status de todas as métricas que não tiverem override.',
+        defaultValue: false,
+        category: ['Alerta e Pop-up (!)'],
+        showIf: (c) => (c.panelMode ?? 'table') === 'table' || c.panelMode === 'singleHost',
+      })
+      .addRadio({
+        path: 'progressColorMode',
+        name: 'Modo de Cor das Barras de Progresso',
+        description: 'Define se as barras mudam de cor gradualmente ao longo da escala ou se a barra inteira assume a cor do threshold atual.',
+        defaultValue: 'gradient',
+        category: ['Alerta e Pop-up (!)'],
+        settings: {
+          options: [
+            { value: 'gradient', label: 'Gradual (Gradiente da Escala)' },
+            { value: 'threshold', label: 'Toda a Barra (Threshold Atual)' },
+          ],
+        },
+        showIf: (c) => (c.panelMode ?? 'table') === 'table' || c.panelMode === 'singleHost',
+      })
+      .addBooleanSwitch({
+        path: 'colorValueByThreshold',
+        name: 'Colorir Valor Numérico da Barra pelo Threshold',
+        description: 'Aplica a cor do threshold ativo também ao valor numérico ao lado da barra de progresso.',
         defaultValue: false,
         category: ['Alerta e Pop-up (!)'],
         showIf: (c) => (c.panelMode ?? 'table') === 'table' || c.panelMode === 'singleHost',

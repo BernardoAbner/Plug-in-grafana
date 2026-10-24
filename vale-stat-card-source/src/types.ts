@@ -107,6 +107,8 @@ export type NativeUnit =
 // ─── Thresholds nativos ────────────────────────────────────────────────────
 
 export type ThresholdsModeNative = 'absolute' | 'percentage';
+export type ThresholdComparisonMode = 'gte' | 'eq' | 'lte';
+export type MetricProfile = 'state_or_binary' | 'continuous_lte' | 'continuous_gte';
 
 export interface ThresholdStep {
   /** Valor a partir do qual este step entra em vigor.
@@ -190,6 +192,7 @@ export interface CustomFieldConfig {
   colorValueByThreshold?: boolean;
   colorSummaryByThreshold?: boolean;
   exactThresholdMatch?: boolean;
+  thresholdComparisonMode?: ThresholdComparisonMode;
   labelColorMode?: LabelColorMode;
   // Gráfico
   chartType: ChartType;
@@ -219,6 +222,7 @@ export interface SimpleOptions {
   showThresholdLine: boolean;
   thresholdMode: ThresholdMode;
   exactThresholdMatch?: boolean;
+  thresholdComparisonMode?: ThresholdComparisonMode;
   labelColorMode?: LabelColorMode;
   disconnectThreshold?: DisconnectThresholdMode;
   // Toggles de visibilidade do cabeçalho

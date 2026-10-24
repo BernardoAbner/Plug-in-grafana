@@ -207,6 +207,20 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
           description: 'Compara thresholds por igualdade exata (==) em vez de (>=). Ideal para ICMP Ping (0 = Down).',
           defaultValue: false,
           category: ['Cabeçalho'],
+        })
+        .addSelect({
+          path: 'thresholdComparisonMode',
+          name: 'Modo de Comparação do Threshold',
+          description: 'Define como os limites de threshold são avaliados: Maior ou Igual (>=), Exatamente Igual (==) ou Menor ou Igual (<=).',
+          defaultValue: 'gte',
+          category: ['Cabeçalho'],
+          settings: {
+            options: [
+              { value: 'gte', label: 'Maior ou Igual (>=) [Padrão]' },
+              { value: 'eq', label: 'Exatamente Igual (==) [Binário / Status]' },
+              { value: 'lte', label: 'Menor ou Igual (<=)' },
+            ],
+          },
         });
     },
   })
@@ -329,6 +343,20 @@ export const plugin = new PanelPlugin<SimpleOptions, CustomFieldConfig>(SimplePa
         defaultValue: false,
         category: ['Aparencia'],
         showIf: (o) => o.useThreshold === true,
+      })
+      .addSelect({
+        path: 'thresholdComparisonMode',
+        name: 'Modo de Comparação do Threshold',
+        description: 'Define como os limites de threshold são avaliados globalmente: Maior ou Igual (>=), Exatamente Igual (==) ou Menor ou Igual (<=).',
+        defaultValue: 'gte',
+        category: ['Aparencia'],
+        settings: {
+          options: [
+            { value: 'gte', label: 'Maior ou Igual (>=) [Padrão]' },
+            { value: 'eq', label: 'Exatamente Igual (==) [Binário / Status]' },
+            { value: 'lte', label: 'Menor ou Igual (<=)' },
+          ],
+        },
       })
       // --- Grafico (panel-level) ---
       .addBooleanSwitch({

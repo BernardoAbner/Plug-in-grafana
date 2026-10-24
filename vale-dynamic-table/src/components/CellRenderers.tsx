@@ -14,7 +14,7 @@ import {
   estimateTypicalStepMs,
   resolveDisconnectThresholdMs,
 } from './UplotChart';
-import { NativeThresholdsConfig, DisconnectThresholdMode, ThresholdComparisonMode, ThresholdStep, DeltaValueFormat } from '../types';
+import { NativeThresholdsConfig, DisconnectThresholdMode, ThresholdComparisonMode, ThresholdStep, DeltaValueFormat, ProgressColorMode } from '../types';
 import { getActiveNativeThreshold, resolveAlertHexColor, resolveColumnThreshold, AlertEpisode } from './SimplePanel';
 
 // ── Contexto de Isolamento Absoluto do Painel (PanelInteractionContext) ───────
@@ -416,8 +416,10 @@ export interface ProgressBarRendererProps {
   max?: number | null;
   color?: string; // Cor do threshold se usar threshold
   useThreshold?: boolean;
+  colorValueByThreshold?: boolean;
   thresholds?: NativeThresholdsConfig;
   comparisonMode?: ThresholdComparisonMode;
+  colorMode?: ProgressColorMode;
   formattedValue?: string;
   showValueText?: boolean;
   height?: ProgressHeight | number;
@@ -431,8 +433,10 @@ export const ProgressBarRenderer: React.FC<ProgressBarRendererProps> = ({
   max = 100,
   color,
   useThreshold = false,
+  colorValueByThreshold = false,
   thresholds,
   comparisonMode = 'gte',
+  colorMode = 'gradient',
   formattedValue,
   showValueText = true,
   height = '6px',
@@ -448,17 +452,24 @@ export const ProgressBarRenderer: React.FC<ProgressBarRendererProps> = ({
 
   const barHeight = typeof height === 'number' ? height : (height === '12px' ? 12 : height === '8px' ? 8 : 6);
 
-  // Gradiente inteligente: se usar threshold, mapeia a escala inteira da barra de verde -> amarelo -> vermelho
-  const fillGradient = useThreshold
-    ? buildProgressBarGradient(rangeMin, rangeMax, thresholds, comparisonMode, defaultColor)
-    : `linear-gradient(90deg, ${parseColorToRgba(defaultColor, 0.70)} 0%, ${defaultColor} 100%)`;
-
   const thrRes = useThreshold && thresholds
     ? resolveColumnThreshold(numVal, thresholds, comparisonMode)
     : undefined;
-  const tipColor = (useThreshold && thrRes?.isViolation)
+  const activeThresholdColor = (useThreshold && thrRes?.isViolation)
     ? thrRes.color
     : (color || defaultColor || '#10b981');
+
+  const isSolidThreshold = colorMode === 'threshold';
+
+  // Gradiente inteligente: se usar threshold, mapeia a escala inteira da barra (gradiente)
+  // ou pinta a barra toda na cor do threshold atual (isSolidThreshold)
+  const fillGradient = useThreshold
+    ? (isSolidThreshold
+        ? `linear-gradient(90deg, ${parseColorToRgba(activeThresholdColor, 0.85)} 0%, ${activeThresholdColor} 100%)`
+        : buildProgressBarGradient(rangeMin, rangeMax, thresholds, comparisonMode, defaultColor))
+    : `linear-gradient(90deg, ${parseColorToRgba(defaultColor, 0.70)} 0%, ${defaultColor} 100%)`;
+
+  const tipColor = activeThresholdColor;
 
   return (
     <div
@@ -487,7 +498,7 @@ export const ProgressBarRenderer: React.FC<ProgressBarRendererProps> = ({
             width: `${percentage.toFixed(1)}%`,
             height: '100%',
             backgroundImage: fillGradient,
-            backgroundSize: (useThreshold && percentage > 0) ? `${(100 / percentage) * 100}% 100%` : '100% 100%',
+            backgroundSize: (useThreshold && !isSolidThreshold && percentage > 0) ? `${(100 / percentage) * 100}% 100%` : '100% 100%',
             backgroundPosition: 'left center',
             backgroundRepeat: 'no-repeat',
             borderRadius: Math.round(barHeight / 2),
@@ -501,7 +512,7 @@ export const ProgressBarRenderer: React.FC<ProgressBarRendererProps> = ({
           style={{
             fontSize: barHeight >= 12 ? 11.5 : 10.5,
             fontWeight: 500,
-            color: (useThreshold && thrRes?.isViolation) ? thrRes.color : 'rgba(255, 255, 255, 0.72)',
+            color: (colorValueByThreshold && thrRes?.isViolation) ? thrRes.color : 'rgba(255, 255, 255, 0.72)',
             fontVariantNumeric: 'tabular-nums',
             minWidth: 32,
             textAlign: 'right',
@@ -522,8 +533,10 @@ export interface SegmentedBarRendererProps {
   max?: number | null;
   color?: string; // Cor do threshold se ativo
   useThreshold?: boolean;
+  colorValueByThreshold?: boolean;
   thresholds?: NativeThresholdsConfig;
   comparisonMode?: ThresholdComparisonMode;
+  colorMode?: ProgressColorMode;
   isActiveThreshold?: boolean;
   formattedValue?: string;
   showValueText?: boolean;
@@ -538,8 +551,10 @@ export const SegmentedBarRenderer: React.FC<SegmentedBarRendererProps> = ({
   max = 100,
   color,
   useThreshold = false,
+  colorValueByThreshold = false,
   thresholds,
   comparisonMode = 'gte',
+  colorMode = 'gradient',
   isActiveThreshold = false,
   formattedValue,
   showValueText = true,
@@ -558,9 +573,12 @@ export const SegmentedBarRenderer: React.FC<SegmentedBarRendererProps> = ({
   const currentThr = useThreshold && thresholds
     ? resolveColumnThreshold(numVal, thresholds, comparisonMode)
     : undefined;
-  const textColor = (useThreshold && currentThr?.isViolation)
+  const activeThresholdColor = (currentThr?.isViolation && currentThr.color)
     ? currentThr.color
-    : (isActiveThreshold && color ? color : 'rgba(255, 255, 255, 0.72)');
+    : (color || defaultColor || '#10b981');
+  const textColor = (colorValueByThreshold && currentThr?.isViolation)
+    ? currentThr.color
+    : (colorValueByThreshold && isActiveThreshold && color ? color : 'rgba(255, 255, 255, 0.72)');
 
   return (
     <div
@@ -582,10 +600,13 @@ export const SegmentedBarRenderer: React.FC<SegmentedBarRendererProps> = ({
           const isLit = i < litCount;
           const segVal = rangeMin + ((i + 0.5) / blockCount) * (rangeMax - rangeMin);
 
-          // Gradiente inteligente por bloco: cada segmento assume a cor da faixa em que está posicionado
+          // Gradiente inteligente por bloco: cada segmento assume a cor da faixa em que está posicionado,
+          // ou todos os blocos acesos assumem a cor do threshold ativo se colorMode === 'threshold'
           let blockColor = defaultColor || '#00B59B';
           if (useThreshold) {
-            if (thresholds?.steps && thresholds.steps.some((st) => st.value !== null)) {
+            if (colorMode === 'threshold') {
+              blockColor = activeThresholdColor;
+            } else if (thresholds?.steps && thresholds.steps.some((st) => st.value !== null)) {
               const res = resolveColumnThreshold(segVal, thresholds, comparisonMode);
               blockColor = res.isViolation
                 ? res.color

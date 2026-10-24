@@ -40,6 +40,7 @@ export type TimeSeriesValueMode = 'badge' | 'text' | 'hidden';
 export type BadgeSize = 'sm' | 'md' | 'lg';
 export type BadgeVisual = 'subtle' | 'solid' | 'outline';
 export type ProgressHeight = '6px' | '8px' | '12px';
+export type ProgressColorMode = 'gradient' | 'threshold';
 /** Cor base do rótulo: 'neutral' = cinza (igual Mín/Méd/Máx), 'accent' = cor do tema/série */
 export type LabelColorMode = 'neutral' | 'accent';
 /** Limite explícito de tempo sem dados antes de interromper a linha do gráfico e episódios */
@@ -113,6 +114,7 @@ export type NativeUnit =
 
 export type ThresholdsModeNative = 'absolute' | 'percentage';
 export type ThresholdComparisonMode = 'gte' | 'eq' | 'lte';
+export type MetricProfile = 'state_or_binary' | 'continuous_lte' | 'continuous_gte';
 
 export interface ThresholdStep {
   /** Valor a partir do qual este step entra em vigor.
@@ -213,7 +215,9 @@ export interface ProgressOverrideConfig {
   progressMin?: number;
   progressMax?: number;
   progressHeight?: ProgressHeight;
+  progressColorMode?: ProgressColorMode;
   showProgressValue?: boolean;
+  colorValueByThreshold?: boolean;
   lineColor?: string;
   useThresholdColors?: boolean;
 }
@@ -280,6 +284,7 @@ export interface CustomFieldConfig {
   progressMax?: number;
   showProgressValue?: boolean;
   progressHeight?: ProgressHeight;
+  progressColorMode?: ProgressColorMode;
   // Propriedades de deltaTrend
   showDeltaValue?: boolean;
   deltaTrendColorMode?: 'proximity' | 'direction' | 'threshold' | 'neutral';
@@ -382,6 +387,8 @@ export interface SimpleOptions {
   statusDisplayMode?: StatusDisplayType;
   useThresholdColors?: boolean;
   thresholdComparisonMode?: ThresholdComparisonMode;
+  progressColorMode?: ProgressColorMode;
+  colorValueByThreshold?: boolean;
   enableAlertPopup?: boolean;
   alertPopupDisplayMode?: 'always' | 'alertOnly';
   timeSeriesValueMode?: TimeSeriesValueMode;

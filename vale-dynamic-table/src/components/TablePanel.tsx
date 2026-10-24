@@ -7,7 +7,7 @@ import {
   getFieldDisplayName,
   GrafanaTheme2,
 } from '@grafana/data';
-import { SimpleOptions, NativeThresholdsConfig, ThresholdComparisonMode, LineInterpolation } from '../types';
+import { SimpleOptions, NativeThresholdsConfig, ThresholdComparisonMode, LineInterpolation, ProgressColorMode } from '../types';
 import { FilterBadgePopover, ColumnFilterConfig } from './ColumnFilterModal';
 import { css } from '@emotion/css';
 import { useStyles2, Icon, useTheme2 } from '@grafana/ui';
@@ -26,6 +26,7 @@ import {
   AlertBadgePopover,
   getBadgeState,
   BadgeInfo,
+  ALERT_TIME_FILTER_STORAGE_KEY,
 } from './SimplePanel';
 import {
   BadgeRenderer,
@@ -958,6 +959,21 @@ export const TablePanel: React.FC<Props> = ({
   const tEnd = data.timeRange?.to?.valueOf() ?? Date.now();
   const disconnectThreshold = options.disconnectThreshold ?? 'auto';
 
+  const isRealtimeWindow = Math.abs(Date.now() - tEnd) < 120000;
+  let isFilteredHistorical = false;
+  try {
+    const rawFilter = typeof window !== 'undefined' ? window.sessionStorage?.getItem(ALERT_TIME_FILTER_STORAGE_KEY) : null;
+    if (rawFilter) {
+      const parsed = JSON.parse(rawFilter);
+      if (parsed && parsed.wasActiveWhenFiltered === false) {
+        isFilteredHistorical = true;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  const canBeActiveNow = isRealtimeWindow && !isFilteredHistorical;
+
   // ── 1. Lógica de Agrupamento Matricial (Pivot: Linhas = Hosts, Colunas = Métricas) ──
   const { matrix, uniqueHosts, uniqueMetrics } = useMemo(() => {
     if (!data?.series?.length) {
@@ -1218,8 +1234,8 @@ export const TablePanel: React.FC<Props> = ({
           theme
         );
 
-        const isCurrentStepViolation = thrResult.isViolation;
-        const hasActiveEpisode = episodes.some((ep) => ep.isActiveNow);
+        const isCurrentStepViolation = canBeActiveNow && thrResult.isViolation;
+        const hasActiveEpisode = canBeActiveNow && episodes.some((ep) => ep.isActiveNow);
         const isActiveNow = isCurrentStepViolation || hasActiveEpisode;
 
         // Determina a cor do threshold violado (para destaque)
@@ -1337,7 +1353,7 @@ export const TablePanel: React.FC<Props> = ({
       uniqueHosts: Array.from(hostsSet),
       uniqueMetrics: Array.from(metricsSet),
     };
-  }, [data, options, fieldConfig, theme, tStart, tEnd, disconnectThreshold]);
+  }, [data, options, fieldConfig, theme, tStart, tEnd, disconnectThreshold, canBeActiveNow]);
 
   // ── 2. Ordenação Inteligente Padrão dos Hosts (Linhas) ──────────────────────
   // Desempate:
@@ -1527,6 +1543,8 @@ export const TablePanel: React.FC<Props> = ({
             state: s.isActiveNow ? 'active' : s.hasHistoricalAlert ? 'historical' : 'normal',
             color: s.corDoThreshold || (s.hasHistoricalAlert ? '#EAB839' : '#F2495C'),
             episodes: s.episodes || [],
+            monitoredDurationMs: s.badge?.monitoredDurationMs,
+            healthyDurationMs: s.badge?.healthyDurationMs,
           };
 
     const renderAlertButton = () => {
@@ -1546,6 +1564,7 @@ export const TablePanel: React.FC<Props> = ({
           currentValueColor={textColor}
           size={18}
           allowNormal={false}
+          onChangeTimeRange={onChangeTimeRange}
         />
       );
     };
@@ -1761,6 +1780,8 @@ export const TablePanel: React.FC<Props> = ({
         const progMax = custom.progressMax ?? 100;
         const showVal = custom.showProgressValue ?? true;
         const barHeight = custom.progressHeight ?? '6px';
+        const progColorMode = custom.progressColorMode ?? (s.field ? getFieldOverrideProperty<ProgressColorMode>(s.field, 'progressColorMode', fieldConfig) : undefined) ?? options.progressColorMode ?? 'gradient';
+        const colorValByThr = custom.colorValueByThreshold ?? (s.field ? getFieldOverrideProperty<boolean>(s.field, 'colorValueByThreshold', fieldConfig) : undefined) ?? options.colorValueByThreshold ?? false;
         const numVal = typeof s.lastVal === 'number' ? s.lastVal : null;
         const barThrResult = resolveColumnThreshold(numVal, s.thresholds, compMode, theme);
         const barColor = useThresholdColors
@@ -1776,8 +1797,10 @@ export const TablePanel: React.FC<Props> = ({
                 max={progMax}
                 color={barColor}
                 useThreshold={useThresholdColors}
+                colorValueByThreshold={colorValByThr}
                 thresholds={s.thresholds}
                 comparisonMode={compMode}
+                colorMode={progColorMode}
                 formattedValue={s.formattedLastVal.text}
                 showValueText={showVal}
                 height={barHeight}
@@ -1793,6 +1816,8 @@ export const TablePanel: React.FC<Props> = ({
         const segMin = custom.progressMin ?? 0;
         const segMax = custom.progressMax ?? 100;
         const showVal = custom.showProgressValue ?? true;
+        const progColorMode = custom.progressColorMode ?? (s.field ? getFieldOverrideProperty<ProgressColorMode>(s.field, 'progressColorMode', fieldConfig) : undefined) ?? options.progressColorMode ?? 'gradient';
+        const colorValByThr = custom.colorValueByThreshold ?? (s.field ? getFieldOverrideProperty<boolean>(s.field, 'colorValueByThreshold', fieldConfig) : undefined) ?? options.colorValueByThreshold ?? false;
         const numVal = typeof s.lastVal === 'number' ? s.lastVal : null;
         const segThrResult = resolveColumnThreshold(numVal, s.thresholds, compMode, theme);
         const segColor = useThresholdColors
@@ -1808,8 +1833,10 @@ export const TablePanel: React.FC<Props> = ({
               max={segMax}
               color={segColor}
               useThreshold={useThresholdColors}
+              colorValueByThreshold={colorValByThr}
               thresholds={s.thresholds}
               comparisonMode={compMode}
+              colorMode={progColorMode}
               isActiveThreshold={isActiveThreshold}
               formattedValue={s.formattedLastVal.text}
               showValueText={showVal}
@@ -2342,6 +2369,8 @@ export const TablePanel: React.FC<Props> = ({
                           s?.corDoThreshold ||
                           (s?.hasHistoricalAlert ? '#EAB839' : '#F2495C'),
                         episodes: s?.episodes || [],
+                        monitoredDurationMs: s?.badge?.monitoredDurationMs,
+                        healthyDurationMs: s?.badge?.healthyDurationMs,
                       };
                 const canShowAlert =
                   Boolean(s) &&
@@ -2447,6 +2476,7 @@ export const TablePanel: React.FC<Props> = ({
                         currentValueColor={nowColor}
                         size={18}
                         allowNormal={false}
+                        onChangeTimeRange={onChangeTimeRange}
                       />
                     )}
 
@@ -2584,9 +2614,9 @@ export const TablePanel: React.FC<Props> = ({
                   justifyContent: 'flex-end',
                   gap: 3,
                 }}
-                title="Clique para ordenar pelo valor de Agora"
+                title={canBeActiveNow ? 'Clique para ordenar pelo valor de Agora' : 'Clique para ordenar pelo último valor da janela'}
               >
-                <span style={{ lineHeight: '16px' }}>AGORA</span>
+                <span style={{ lineHeight: '16px' }}>{canBeActiveNow ? 'AGORA' : 'ÚLTIMO'}</span>
                 {sortConfig.column === primaryMetricName && (
                   <Icon
                     name={sortConfig.direction === 'asc' ? 'arrow-up' : 'arrow-down'}

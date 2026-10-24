@@ -12,11 +12,11 @@ import {
 import {
   SimpleOptions, CardTheme,
   NativeThresholdsConfig, ThresholdStep, CustomFieldConfig, DisconnectThresholdMode,
-  ThresholdComparisonMode,
+  ThresholdComparisonMode, MetricProfile,
 } from '../types';
 import { css, cx } from '@emotion/css';
 import { useStyles2, Icon, useTheme2 } from '@grafana/ui';
-import { PanelDataErrorView } from '@grafana/runtime';
+import { PanelDataErrorView, locationService } from '@grafana/runtime';
 import { UplotChart, parseColorToRgba, resolveCanvasColor, estimateTypicalStepMs, resolveDisconnectThresholdMs } from './UplotChart';
 
 interface Props extends PanelProps<SimpleOptions> { }
@@ -723,6 +723,94 @@ export function resolveAlertHexColor(color?: string | null, fallback = '#E24D42'
 }
 
 /**
+ * Determina se o episódio `candidate` possui maior criticidade que `current`.
+ * Respeita o modo de comparação do threshold:
+ * - 'gte': stepValue maior = mais crítico (ex: 80% > 40%)
+ * - 'lte': stepValue menor = mais crítico (ex: 10% < 30%)
+ * - 'eq' ou empate: desempate pela ordem de configuração dos steps e peso da cor.
+ */
+export function isMoreCriticalEpisode(
+  candidate: AlertEpisode,
+  current: AlertEpisode,
+  mode: ThresholdComparisonMode = 'gte',
+  thresholds?: NativeThresholdsConfig
+): boolean {
+  if (mode === 'lte') {
+    if (Math.abs(candidate.stepValue - current.stepValue) > 1e-6) {
+      return candidate.stepValue < current.stepValue;
+    }
+  } else if (mode === 'gte') {
+    if (Math.abs(candidate.stepValue - current.stepValue) > 1e-6) {
+      return candidate.stepValue > current.stepValue;
+    }
+  }
+
+  // Se o stepValue for igual ou for 'eq', busca a posição nos steps configurados
+  if (thresholds?.steps && thresholds.steps.length > 0) {
+    const candidateIdx = thresholds.steps.findIndex(
+      (s) => s.value !== null && s.value !== undefined && Math.abs(Number(s.value) - candidate.stepValue) < 1e-6
+    );
+    const currentIdx = thresholds.steps.findIndex(
+      (s) => s.value !== null && s.value !== undefined && Math.abs(Number(s.value) - current.stepValue) < 1e-6
+    );
+    if (candidateIdx !== -1 && currentIdx !== -1 && candidateIdx !== currentIdx) {
+      // No Grafana, steps posteriores na lista são mais severos
+      return candidateIdx > currentIdx;
+    }
+  }
+
+  // Fallback por peso de cor de severidade
+  const getColorWeight = (color?: string): number => {
+    if (!color) return 0;
+    const c = color.toLowerCase();
+    if (c.includes('dark-red') || c.includes('purple') || c === '#e02f44' || c === '#c4162a' || c === '#8f0714') return 5;
+    if (c.includes('red') || c === '#f2495c' || c === '#d44a3a' || c === '#e53935') return 4;
+    if (c.includes('orange') || c === '#ff780a' || c === '#fa8f37' || c === '#ff9800') return 3;
+    if (c.includes('yellow') || c === '#eab839' || c === '#f2cc0c' || c === '#fbc02d') return 2;
+    if (c.includes('blue')) return 1;
+    return 0;
+  };
+
+  return getColorWeight(candidate.color) > getColorWeight(current.color);
+}
+
+/**
+ * Remove ocorrências de alerta duplicadas que possuem exatamente o mesmo intervalo de tempo (início e fim iguais),
+ * preservando estritamente aquela de MAIOR CRITICIDADE conforme a regra do threshold.
+ */
+export function deduplicateEpisodesByCriticality(
+  episodes: AlertEpisode[],
+  mode: ThresholdComparisonMode = 'gte',
+  thresholds?: NativeThresholdsConfig
+): AlertEpisode[] {
+  if (!episodes || episodes.length <= 1) {
+    return episodes || [];
+  }
+
+  const result: AlertEpisode[] = [];
+
+  for (const ep of episodes) {
+    const matchIdx = result.findIndex((existing) => {
+      const sameStart = Math.abs(existing.startTs - ep.startTs) <= 1000;
+      const sameEnd = Math.abs(existing.endTs - ep.endTs) <= 1000;
+      const bothActive = Boolean(existing.isActiveNow) && Boolean(ep.isActiveNow);
+      return sameStart && (sameEnd || bothActive);
+    });
+
+    if (matchIdx === -1) {
+      result.push(ep);
+    } else {
+      const existing = result[matchIdx];
+      if (isMoreCriticalEpisode(ep, existing, mode, thresholds)) {
+        result[matchIdx] = ep;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
  * Varre o array de valores avaliando cada threshold step válido em sua própria passagem independente.
  * Retorna um Array Plano (flat array) unificado com todas as ocorrências da janela,
  * ordenado estritamente por:
@@ -776,12 +864,27 @@ export function getAlertEpisodes(
 
   const allEpisodes: AlertEpisode[] = [];
 
+  // Identifica se a janela atual monitorada está no tempo real (presente)
+  // Se for um recorte histórico passado ou filtrado pelo card, nenhum caso pode ser considerado ativo agora
+  let isRealtimeWindow = Math.abs(Date.now() - tEnd) < 120000;
+  try {
+    const rawFilter = typeof window !== 'undefined' ? window.sessionStorage?.getItem(ALERT_TIME_FILTER_STORAGE_KEY) : null;
+    if (rawFilter) {
+      const parsed = JSON.parse(rawFilter);
+      if (parsed && parsed.wasActiveWhenFiltered === false) {
+        isRealtimeWindow = false;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
   // Passagem independente do início ao fim da série para cada step configurado
   for (const step of validSteps) {
     let current: AlertEpisode | null = null;
     const close = () => {
       if (current) {
-        current.isActiveNow = current._lastIndex === lastValidIndex;
+        current.isActiveNow = isRealtimeWindow && current._lastIndex === lastValidIndex;
         allEpisodes.push(current);
         current = null;
       }
@@ -866,10 +969,14 @@ export function getAlertEpisodes(
     close();
   }
 
+  // Deduplica episódios com o mesmo intervalo de tempo na mesma métrica,
+  // mantendo apenas aquele de maior criticidade
+  const deduplicated = deduplicateEpisodesByCriticality(allEpisodes, mode, thresholds);
+
   // Ordenação estrita do array plano unificado:
-  // 1º: Casos isActiveNow === true no topo (ordenados por maior severidade/stepValue)
+  // 1º: Casos isActiveNow === true no topo (ordenados por maior severidade)
   // 2º: Casos encerrados ordenados do mais recente para o mais antigo (b.startTs - a.startTs)
-  return allEpisodes.sort((a, b) => {
+  return deduplicated.sort((a, b) => {
     const aActive = Boolean(a.isActiveNow);
     const bActive = Boolean(b.isActiveNow);
 
@@ -878,14 +985,14 @@ export function getAlertEpisodes(
     }
 
     if (aActive && bActive) {
-      return b.stepValue - a.stepValue;
+      return mode === 'lte' ? a.stepValue - b.stepValue : b.stepValue - a.stepValue;
     }
 
     if (b.startTs !== a.startTs) {
       return b.startTs - a.startTs;
     }
 
-    return b.stepValue - a.stepValue;
+    return mode === 'lte' ? a.stepValue - b.stepValue : b.stepValue - a.stepValue;
   });
 }
 
@@ -946,6 +1053,109 @@ export interface BadgeInfo {
   color: string;
   /** Episódios de violação para renderizar volumetria no Popover */
   episodes: AlertEpisode[];
+  /** Tempo total (ms) em que houve coleta válida de dados na janela */
+  monitoredDurationMs?: number;
+  /** Tempo total (ms) em que a métrica esteve saudável (sem violar thresholds) com coleta válida */
+  healthyDurationMs?: number;
+}
+
+/**
+ * Calcula a duração total efetivamente monitorada/coletada (monitoredDurationMs)
+ * e a duração em estado saudável sem violação de threshold (healthyDurationMs) na janela [tStart, tEnd],
+ * respeitando estritamente o mesmo maxGapMs de desconexão usado em getAlertEpisodes.
+ * Evita que lacunas sem coleta de dados (gaps) sejam contabilizadas falsamente como tempo "Up" (disponível).
+ */
+export function getMonitoredAndHealthyDurationMs(
+  values: number[],
+  times: number[],
+  thresholds: NativeThresholdsConfig | undefined,
+  tStart: number,
+  tEnd: number,
+  exactMatchOrMode: boolean | ThresholdComparisonMode = false,
+  disconnectThreshold: DisconnectThresholdMode = 'auto'
+): { monitoredDurationMs: number; healthyDurationMs: number } {
+  if (!values || values.length === 0) {
+    return { monitoredDurationMs: 0, healthyDurationMs: 0 };
+  }
+
+  const mode: ThresholdComparisonMode =
+    typeof exactMatchOrMode === 'string'
+      ? exactMatchOrMode
+      : exactMatchOrMode
+      ? 'eq'
+      : 'gte';
+
+  const validSteps: number[] = [];
+  if (thresholds?.steps) {
+    for (const step of thresholds.steps) {
+      if (step.value !== null && step.value !== undefined && (step.value as any) !== '' && !isNaN(Number(step.value))) {
+        validSteps.push(Number(step.value));
+      }
+    }
+  }
+
+  const sampleStep = estimateTypicalStepMs(times, tStart, tEnd);
+  const maxGapMs = resolveDisconnectThresholdMs(sampleStep, disconnectThreshold);
+
+  let monitoredDurationMs = 0;
+  let healthyDurationMs = 0;
+
+  for (let i = 0; i < values.length; i++) {
+    const rawVal = values[i];
+    if (rawVal === null || rawVal === undefined || (rawVal as any) === '' || isNaN(Number(rawVal))) {
+      continue;
+    }
+
+    const value = Number(rawVal);
+
+    const ptTime = times[i] !== undefined ? times[i] : (tStart + i * sampleStep);
+    let nextPtTime: number;
+    if (i + 1 < times.length && times[i + 1] !== undefined && times[i + 1] > ptTime) {
+      const dt = times[i + 1] - ptTime;
+      if (dt > maxGapMs) {
+        nextPtTime = ptTime + sampleStep;
+      } else {
+        nextPtTime = times[i + 1];
+      }
+    } else if (ptTime < tEnd) {
+      const dtEnd = tEnd - ptTime;
+      nextPtTime = dtEnd > maxGapMs ? (ptTime + sampleStep) : tEnd;
+    } else {
+      nextPtTime = ptTime + sampleStep;
+    }
+
+    const from = Math.max(ptTime, tStart);
+    const to = Math.max(nextPtTime, from + 1);
+    const segMs = Math.max(0, to - from);
+
+    monitoredDurationMs += segMs;
+
+    let violates = false;
+    for (const stepVal of validSteps) {
+      if (mode === 'eq') {
+        if (Math.abs(value - stepVal) < 1e-6) {
+          violates = true;
+          break;
+        }
+      } else if (mode === 'lte') {
+        if (value <= stepVal) {
+          violates = true;
+          break;
+        }
+      } else {
+        if (value >= stepVal) {
+          violates = true;
+          break;
+        }
+      }
+    }
+
+    if (!violates) {
+      healthyDurationMs += segMs;
+    }
+  }
+
+  return { monitoredDurationMs, healthyDurationMs };
 }
 
 /**
@@ -975,33 +1185,156 @@ export function getBadgeState(
       : 'gte';
 
   const episodes = getAlertEpisodes(allValues, timeValues, thresholds, tStart, tEnd, mode, disconnectThreshold);
+  const { monitoredDurationMs, healthyDurationMs } = getMonitoredAndHealthyDurationMs(
+    allValues,
+    timeValues,
+    thresholds,
+    tStart,
+    tEnd,
+    mode,
+    disconnectThreshold
+  );
   const activeEpisodes = episodes.filter((ep) => ep.isActiveNow);
 
+  // Identifica se a janela atual monitorada está no tempo real (presente)
+  const isRealtimeWindow = Math.abs(Date.now() - tEnd) < 120000;
+  let isFilteredHistorical = false;
+  try {
+    const rawFilter = typeof window !== 'undefined' ? window.sessionStorage?.getItem(ALERT_TIME_FILTER_STORAGE_KEY) : null;
+    if (rawFilter) {
+      const parsed = JSON.parse(rawFilter);
+      if (parsed && parsed.wasActiveWhenFiltered === false) {
+        isFilteredHistorical = true;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  const canBeActiveNow = isRealtimeWindow && !isFilteredHistorical;
+
   // Estado A — isCurrentlyActive: O valor atual (lastVal) viola o threshold agora
-  if (lastVal !== null) {
+  if (canBeActiveNow && lastVal !== null) {
     const res = resolveColumnThreshold(lastVal, thresholds, mode, _theme);
     if (res.isViolation) {
-      return { state: 'active', color: res.color, episodes };
+      return { state: 'active', color: res.color, episodes, monitoredDurationMs, healthyDurationMs };
     }
   }
 
   // Se algum episódio foi marcado como ativo agora, herda a cor do step ativo mais severo
-  if (activeEpisodes.length > 0) {
+  if (canBeActiveNow && activeEpisodes.length > 0) {
     const highestActive = activeEpisodes[0]; // episodes já vêm ordenados com o ativo de maior severidade no topo
     const stepColor = thresholds?.steps?.find(
       (s) => s.value !== null && Math.abs(Number(s.value) - highestActive.stepValue) < 1e-6
     )?.color;
     const color = resolveAlertHexColor(stepColor || highestActive.color || activeThresholdColor);
-    return { state: 'active', color, episodes };
+    return { state: 'active', color, episodes, monitoredDurationMs, healthyDurationMs };
   }
 
   // Estado B — wasActiveInWindow: O valor atual normalizou, mas houve episódios passados na janela
   if (episodes.length > 0) {
     // Cor exclusiva de histórico: âmbar suave
-    return { state: 'historical', color: '#EAB839', episodes };
+    return { state: 'historical', color: '#EAB839', episodes, monitoredDurationMs, healthyDurationMs };
   }
 
-  return { state: 'normal', color: '', episodes: [] };
+  return { state: 'normal', color: '', episodes: [], monitoredDurationMs, healthyDurationMs };
+}
+
+/**
+ * Classifica o perfil da métrica para determinar o tratamento estatístico adequado no Pop-up de Alertas.
+ * Evita que métricas binárias ou de estado (Value Mapping como Up/Down) exibam médias matemáticas sem sentido.
+ *
+ * @param series - Field, array de números ou objeto com values da série
+ * @param thresholdComparisonMode - Modo de comparação de threshold ('gte' | 'lte' | 'eq')
+ * @param displayProcessor - Processador de display do Grafana (field.display) ou função de formatação
+ * @returns MetricProfile: 'state_or_binary' | 'continuous_lte' | 'continuous_gte'
+ */
+export function getMetricProfile(
+  series: Field | number[] | any[] | { values: any } | null | undefined,
+  thresholdComparisonMode?: ThresholdComparisonMode | string,
+  displayProcessor?: ((val: any) => { text: string; [key: string]: any }) | ((val: any) => string) | null
+): MetricProfile {
+  // Regra (b): Se thresholdComparisonMode === 'eq', retorna 'state_or_binary'
+  if (thresholdComparisonMode === 'eq') {
+    return 'state_or_binary';
+  }
+
+  // Extração segura dos valores numéricos válidos da série
+  const validNumbers: number[] = [];
+  if (Array.isArray(series)) {
+    for (let i = 0; i < series.length; i++) {
+      const v = series[i];
+      if (v !== null && v !== undefined && v !== '' && !isNaN(Number(v))) {
+        validNumbers.push(Number(v));
+      }
+    }
+  } else if (series && typeof series === 'object') {
+    const raw = 'values' in series ? (series as any).values : [];
+    const arr = Array.isArray(raw)
+      ? raw
+      : typeof raw?.toArray === 'function'
+      ? raw.toArray()
+      : Array.from(raw || []);
+    for (let i = 0; i < arr.length; i++) {
+      const v = arr[i];
+      if (v !== null && v !== undefined && v !== '' && !isNaN(Number(v))) {
+        validNumbers.push(Number(v));
+      }
+    }
+  }
+
+  // Regra (a): Todos os valores válidos da série são 0 ou 1
+  if (validNumbers.length > 0 && validNumbers.every((v) => v === 0 || v === 1)) {
+    return 'state_or_binary';
+  }
+
+  // Regra (c): Ao passar o valor máximo/mínimo da série no displayProcessor(val).text,
+  // o resultado for uma string puramente alfabética (ex: "Down", "Up") sem dígitos numéricos [0-9]
+  if (validNumbers.length > 0 && displayProcessor) {
+    let minVal = Infinity;
+    let maxVal = -Infinity;
+    for (let i = 0; i < validNumbers.length; i++) {
+      const n = validNumbers[i];
+      if (n < minVal) minVal = n;
+      if (n > maxVal) maxVal = n;
+    }
+
+    if (minVal !== Infinity && maxVal !== -Infinity) {
+      const extractText = (val: number): string => {
+        try {
+          const res = (displayProcessor as any)(val);
+          if (typeof res === 'string') {
+            return res.trim();
+          }
+          return (res?.text ?? '').trim();
+        } catch {
+          return '';
+        }
+      };
+
+      const minText = extractText(minVal);
+      const maxText = extractText(maxVal);
+
+      const isPureAlpha = (str: string): boolean => {
+        if (!str) return false;
+        const s = str.trim();
+        if (s.length === 0) return false;
+        // Não possui dígitos numéricos [0-9] e possui caracteres alfabéticos (com suporte a acentos/unicode)
+        return !/\d/.test(s) && /[a-zA-Z\u00C0-\u017F]/.test(s);
+      };
+
+      if (isPureAlpha(minText) || isPureAlpha(maxText)) {
+        return 'state_or_binary';
+      }
+    }
+  }
+
+  // Retorna 'continuous_lte' SE não for binária E (thresholdComparisonMode === 'lte')
+  if (thresholdComparisonMode === 'lte') {
+    return 'continuous_lte';
+  }
+
+  // Retorna 'continuous_gte' (Padrão) para qualquer outra métrica contínua
+  return 'continuous_gte';
 }
 
 function humanDuration(ms: number, _unit: 'ms'): string {
@@ -1014,6 +1347,275 @@ function humanDuration(ms: number, _unit: 'ms'): string {
   if (h < 24) { return `${Math.floor(h)}h ${Math.round(m % 60)}m`; }
   const d = h / 24;
   return `${Math.floor(d)}d ${Math.round(h % 24)}h`;
+}
+
+export interface ThirdSummaryCellData {
+  label: string;
+  value: string;
+  color: string;
+  subtext?: string;
+  title?: string;
+}
+
+/**
+ * Resolve estritamente a 3ª Coluna do Resumo Contextual (Pop-up/Drawer) conforme o perfil da métrica (profile).
+ * 1. state_or_binary: DISPONIBILIDADE (% Up com cor verde se não estiver ativo ou alerta se Down).
+ * 2. continuous_lte: MÍNIMO CRÍTICO (menor valor registrado com a cor do threshold).
+ * 3. continuous_gte: PICO MÁXIMO (maior valor registrado com a cor do threshold).
+ */
+export function resolveThirdSummaryCell(
+  profile: MetricProfile,
+  resolvedEpisodes: AlertEpisode[],
+  totalMs: number,
+  tStart: number,
+  tEnd: number,
+  field: Field | undefined,
+  comparisonMode: ThresholdComparisonMode | undefined,
+  formatValue: (v: number) => string,
+  badgeState: string,
+  badgeColor?: string,
+  fallbackColor = '#EAB839',
+  monitoredDurationMs?: number,
+  healthyDurationMs?: number
+): ThirdSummaryCellData {
+  const windowDurationMs = Math.max(1, tEnd - tStart);
+  const activeEpisode = resolvedEpisodes.find((ep) => ep.isActiveNow);
+  const isCurrentlyDown = Boolean(activeEpisode || badgeState === 'active');
+
+  if (profile === 'state_or_binary') {
+    const hasMonitoredData = monitoredDurationMs !== undefined && monitoredDurationMs > 0;
+    const effectiveMonitoredMs = hasMonitoredData
+      ? Math.max(monitoredDurationMs, totalMs)
+      : windowDurationMs;
+    const effectiveHealthyMs =
+      healthyDurationMs !== undefined
+        ? Math.min(healthyDurationMs, Math.max(0, effectiveMonitoredMs - totalMs))
+        : Math.max(0, effectiveMonitoredMs - totalMs);
+
+    const availPct =
+      effectiveMonitoredMs > 0
+        ? Math.max(0, Math.min(100, (effectiveHealthyMs / effectiveMonitoredMs) * 100))
+        : 0;
+    const availFormatted =
+      availPct === 100
+        ? '100%'
+        : availPct <= 0
+        ? '0%'
+        : availPct >= 99.95
+        ? '99.9%'
+        : `${availPct.toFixed(1)}%`;
+
+    let healthyLabel = 'Up';
+    if (field?.display) {
+      try {
+        const text1 = field.display(1)?.text?.trim();
+        if (text1 && !/\d/.test(text1) && /[a-zA-Z\u00C0-\u017F]/.test(text1)) {
+          healthyLabel = text1;
+        } else {
+          const text0 = field.display(0)?.text?.trim();
+          if (text0 && !/\d/.test(text0) && comparisonMode === 'eq') {
+            healthyLabel = 'Up';
+          }
+        }
+      } catch {
+        healthyLabel = 'Up';
+      }
+    }
+
+    const value = `${availFormatted} ${healthyLabel}`;
+    const color =
+      isCurrentlyDown || availPct === 0
+        ? resolveAlertHexColor(activeEpisode?.color || resolvedEpisodes[0]?.color || badgeColor || '#F2495C')
+        : '#10b981';
+
+    const maxDowntimeMs = resolvedEpisodes.length > 0
+      ? Math.max(...resolvedEpisodes.map((ep) => Math.max(0, ep.endTs - ep.startTs)))
+      : 0;
+    const noDataMs = Math.max(0, windowDurationMs - effectiveMonitoredMs);
+    const subtext = maxDowntimeMs > 0 ? `Maior queda: ${humanDuration(maxDowntimeMs, 'ms')}` : undefined;
+    const title =
+      noDataMs >= windowDurationMs * 0.05 && subtext
+        ? `${subtext} • Sem coleta: ${humanDuration(noDataMs, 'ms')}`
+        : subtext;
+
+    return {
+      label: 'DISPONIBILIDADE',
+      value,
+      color,
+      subtext,
+      title,
+    };
+  }
+
+  if (profile === 'continuous_lte') {
+    const minEpisode = resolvedEpisodes.length > 0
+      ? resolvedEpisodes.reduce((prev, curr) => (curr.minValue < prev.minValue ? curr : prev), resolvedEpisodes[0])
+      : undefined;
+
+    return {
+      label: 'MÍNIMO CRÍTICO',
+      value: minEpisode ? formatValue(minEpisode.minValue) : '—',
+      color: minEpisode ? resolveAlertHexColor(minEpisode.color || fallbackColor) : fallbackColor,
+    };
+  }
+
+  // continuous_gte (Padrão)
+  const peakEpisode = resolvedEpisodes.length > 0
+    ? resolvedEpisodes.reduce((prev, curr) => (curr.maxValue > prev.maxValue ? curr : prev), resolvedEpisodes[0])
+    : undefined;
+
+  return {
+    label: 'PICO MÁXIMO',
+    value: peakEpisode ? formatValue(peakEpisode.maxValue) : '—',
+    color: peakEpisode ? resolveAlertHexColor(peakEpisode.color || fallbackColor) : fallbackColor,
+  };
+}
+
+/**
+ * Renderiza a mini-grade de 3 colunas na base de CADA CARD de ocorrência (Pop-up/Drawer)
+ * adaptada estritamente conforme o perfil da métrica (profile):
+ * 1. state_or_binary: ESTADO ATINGIDO | IMPACTO NA JANELA | APÓS O EVENTO (proibido Pico/Média/Mínimo)
+ * 2. continuous_lte: MÍNIMO | MÉDIA | MÁXIMO
+ * 3. continuous_gte: PICO | MÉDIA | MÍNIMO
+ */
+export function renderEpisodeCardBottomGrid(
+  ep: AlertEpisode,
+  profile: MetricProfile,
+  tStart: number,
+  tEnd: number,
+  formatValue: (v: number) => string,
+  statCell: (
+    label: string,
+    value: string,
+    extra?: React.CSSProperties,
+    valueStyle?: React.CSSProperties,
+    subtext?: string,
+    title?: string
+  ) => React.ReactNode,
+  field?: Field
+): React.ReactNode {
+  if (profile === 'state_or_binary') {
+    const windowDurationMs = Math.max(1, tEnd - tStart);
+    const impactPct = (ep.durationMs / windowDurationMs) * 100;
+    const impactText = impactPct < 0.1 ? '< 0,1%' : `${impactPct.toFixed(1).replace('.', ',')}%`;
+
+    let stateText = formatValue(ep.stepValue);
+    if (field?.display) {
+      try {
+        const d = field.display(ep.stepValue);
+        if (d && d.text) {
+          stateText = d.text + (d.suffix || '');
+        }
+      } catch {
+        // fallback to formatValue
+      }
+    }
+
+    const afterText = ep.isActiveNow ? 'Permanece em alerta' : 'Retornou p/ normal';
+    const afterColor = ep.isActiveNow ? resolveAlertHexColor(ep.color || '#F2495C') : '#10b981';
+
+    return (
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr 1fr',
+          gap: 4,
+          marginTop: 2,
+          padding: '4px 6px',
+          borderRadius: 4,
+          background: 'rgba(0,0,0,0.22)',
+          textAlign: 'center',
+        }}
+      >
+        {statCell('Estado Atingido', stateText, { textAlign: 'center' }, { fontWeight: 700, color: ep.color, textAlign: 'center' })}
+        {statCell(
+          'Impacto na Janela',
+          impactText,
+          {
+            borderLeft: '1px solid rgba(255,255,255,0.07)',
+            borderRight: '1px solid rgba(255,255,255,0.07)',
+            textAlign: 'center',
+          },
+          { fontWeight: 600, color: '#e2e8f0', textAlign: 'center' }
+        )}
+        {statCell(
+          'Após o Evento',
+          afterText,
+          { textAlign: 'center' },
+          { fontWeight: 600, fontSize: 9.5, color: afterColor, textAlign: 'center' },
+          undefined,
+          afterText
+        )}
+      </div>
+    );
+  }
+
+  if (profile === 'continuous_lte') {
+    return (
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr 1fr',
+          gap: 4,
+          marginTop: 2,
+          padding: '4px 6px',
+          borderRadius: 4,
+          background: 'rgba(0,0,0,0.22)',
+        }}
+      >
+        {statCell(
+          'Mínimo',
+          ep.minValue !== undefined && !isNaN(ep.minValue) ? formatValue(ep.minValue) : '—',
+          {},
+          { fontWeight: 700, color: ep.color }
+        )}
+        {statCell(
+          'Média',
+          ep.avgValue !== undefined && !isNaN(ep.avgValue) ? formatValue(ep.avgValue) : '—',
+          { borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' }
+        )}
+        {statCell(
+          'Máximo',
+          ep.maxValue !== undefined && !isNaN(ep.maxValue) ? formatValue(ep.maxValue) : '—',
+          {},
+          { opacity: 0.85 }
+        )}
+      </div>
+    );
+  }
+
+  // continuous_gte (Padrão)
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr 1fr',
+        gap: 4,
+        marginTop: 2,
+        padding: '4px 6px',
+        borderRadius: 4,
+        background: 'rgba(0,0,0,0.22)',
+      }}
+    >
+      {statCell(
+        'Pico',
+        ep.maxValue !== undefined && !isNaN(ep.maxValue) ? formatValue(ep.maxValue) : '—',
+        {},
+        { fontWeight: 700, color: ep.color }
+      )}
+      {statCell(
+        'Média',
+        ep.avgValue !== undefined && !isNaN(ep.avgValue) ? formatValue(ep.avgValue) : '—',
+        { borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' }
+      )}
+      {statCell(
+        'Mínimo',
+        ep.minValue !== undefined && !isNaN(ep.minValue) ? formatValue(ep.minValue) : '—',
+        {},
+        { opacity: 0.85 }
+      )}
+    </div>
+  );
 }
 
 function pad2(n: number): string { return String(n).padStart(2, '0'); }
@@ -1389,6 +1991,8 @@ const openPopupRegistry: HTMLElement[] = [];
 interface AlertWindowStats {
   totalMs: number;
   windowMs: number;
+  monitoredMs?: number;
+  profile?: MetricProfile;
   spansDays: boolean;
   exactMatch: boolean;
   comparisonMode?: ThresholdComparisonMode;
@@ -1403,13 +2007,19 @@ function getAlertContextSummary(episodes: AlertEpisode[], windowStats: AlertWind
     return 'Nenhuma violação registrada no período.';
   }
 
-  const { totalMs, windowMs, spansDays, exactMatch, comparisonMode, formatValue } = windowStats;
-  const safeWindowMs = Math.max(windowMs, totalMs, 1);
-  const alertRatio = Math.min(1, totalMs / safeWindowMs);
+  const { totalMs, windowMs, monitoredMs, profile, spansDays, exactMatch, comparisonMode, formatValue } = windowStats;
+  const effectiveWindowMs =
+    monitoredMs !== undefined && monitoredMs > 0
+      ? Math.max(monitoredMs, totalMs, 1)
+      : Math.max(windowMs, totalMs, 1);
+  const noDataMs = Math.max(0, windowMs - effectiveWindowMs);
+  const hasSignificantNoData = noDataMs >= windowMs * 0.1;
+  const alertRatio = Math.min(1, totalMs / effectiveWindowMs);
   const pct = Math.min(100, Math.round(alertRatio * 100));
   const op = comparisonMode === 'eq' || exactMatch ? '=' : comparisonMode === 'lte' ? '≤' : '≥';
   const hasActive = episodes.some((ep) => ep.isActiveNow);
   const peakEp = episodes.reduce((prev, curr) => (curr.maxValue > prev.maxValue ? curr : prev), episodes[0]);
+  const minEp = episodes.reduce((prev, curr) => (curr.minValue < prev.minValue ? curr : prev), episodes[0]);
 
   // Agrupa durações por nível de threshold para detectar escalada entre múltiplos níveis
   const stepTotals = new Map<number, { stepValue: number; durationMs: number; color: string; count: number }>();
@@ -1429,23 +2039,46 @@ function getAlertContextSummary(episodes: AlertEpisode[], windowStats: AlertWind
   }
   const sortedLevels = [...stepTotals.values()].sort((a, b) => a.stepValue - b.stepValue);
 
-  // Cenário 1: >= 95% do tempo em alerta
+  // Cenário 1: >= 95% do tempo (coletado) em alerta
   if (alertRatio >= 0.95) {
     if (sortedLevels.length >= 2) {
       const lowest = sortedLevels[0];
       const highest = sortedLevels[sortedLevels.length - 1];
       return (
         <>
-          Permaneceu fora do padrão durante <strong>{pct}%</strong> do período ({op}{' '}
+          Permaneceu fora do padrão durante <strong>{pct}%</strong> do período {hasSignificantNoData ? 'com coleta' : ''} ({op}{' '}
           <strong style={{ color: lowest.color }}>{formatValue(lowest.stepValue)}</strong>), agravando para {op}{' '}
           <strong style={{ color: highest.color }}>{formatValue(highest.stepValue)}</strong> por{' '}
           <strong>{humanDuration(highest.durationMs, 'ms')}</strong>.
         </>
       );
     }
+    if (profile === 'state_or_binary') {
+      return (
+        <>
+          Permaneceu em <strong style={{ color: peakEp.color }}>{formatValue(peakEp.stepValue)}</strong> durante{' '}
+          <strong>{pct}%</strong> do período {hasSignificantNoData ? 'com coleta' : 'analisado'} (
+          <strong>{humanDuration(totalMs, 'ms')}</strong>)
+          {hasSignificantNoData ? (
+            <> — com <strong>{humanDuration(noDataMs, 'ms')}</strong> sem coleta na janela.</>
+          ) : (
+            '.'
+          )}
+        </>
+      );
+    }
+    if (profile === 'continuous_lte') {
+      return (
+        <>
+          Permaneceu fora do padrão durante <strong>{pct}%</strong> do período {hasSignificantNoData ? 'com coleta' : 'analisado'} (
+          <strong>{humanDuration(totalMs, 'ms')}</strong>), com mínimo de{' '}
+          <strong style={{ color: minEp.color }}>{formatValue(minEp.minValue)}</strong>.
+        </>
+      );
+    }
     return (
       <>
-        Permaneceu fora do padrão durante <strong>{pct}%</strong> do período analisado (
+        Permaneceu fora do padrão durante <strong>{pct}%</strong> do período {hasSignificantNoData ? 'com coleta' : 'analisado'} (
         <strong>{humanDuration(totalMs, 'ms')}</strong>), com pico de{' '}
         <strong style={{ color: peakEp.color }}>{formatValue(peakEp.maxValue)}</strong>.
       </>
@@ -1531,7 +2164,19 @@ export interface AlertInspectPayload {
   metricLabel: string;
   currentValueText: string;
   currentValueColor?: string;
+  onChangeTimeRange?: (range: { from: number; to: number }) => void;
 }
+
+export interface TimeRangeBackup {
+  from: string | number;
+  to: string | number;
+  startTs: number;
+  endTs: number;
+  stepValue: number;
+  wasActiveWhenFiltered?: boolean;
+}
+
+export const ALERT_TIME_FILTER_STORAGE_KEY = 'vale_alert_time_filter_backup';
 
 /**
  * Aba Lateral Esquerda (Left Side Drawer) renderizada via createPortal em document.body.
@@ -1590,21 +2235,154 @@ const AlertLeftDrawer: React.FC<{
     return () => document.removeEventListener('keydown', handleKey);
   }, [onClose]);
 
-  const { badge, tStart, tEnd, field, theme, exactMatch = false, comparisonMode, fieldConfig, metricLabel, currentValueText, currentValueColor } = payload;
+  const { badge, tStart, tEnd, field, theme, exactMatch = false, comparisonMode, fieldConfig, metricLabel, currentValueText, currentValueColor, onChangeTimeRange } = payload;
+
+  const [activeTimeFilter, setActiveTimeFilter] = useState<TimeRangeBackup | null>(() => {
+    try {
+      const raw = sessionStorage.getItem(ALERT_TIME_FILTER_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const handleRestoreTimeRange = useCallback(() => {
+    let backup = activeTimeFilter;
+    if (!backup) {
+      try {
+        const raw = sessionStorage.getItem(ALERT_TIME_FILTER_STORAGE_KEY);
+        if (raw) {
+          backup = JSON.parse(raw);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (backup) {
+      const { from, to } = backup;
+      if (onChangeTimeRange) {
+        try {
+          const numFrom = typeof from === 'number' ? from : Number(from) || tStart;
+          const numTo = typeof to === 'number' ? to : Number(to) || tEnd;
+          onChangeTimeRange({ from: numFrom, to: numTo });
+        } catch (err) {
+          console.warn('Falha em onChangeTimeRange ao restaurar:', err);
+        }
+      }
+      try {
+        locationService.partial({ from, to });
+      } catch (err) {
+        console.warn('Falha em locationService.partial ao restaurar:', err);
+      }
+    }
+
+    try {
+      sessionStorage.removeItem(ALERT_TIME_FILTER_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+    setActiveTimeFilter(null);
+  }, [activeTimeFilter, onChangeTimeRange, tStart, tEnd]);
+
+  const handleEpisodeClick = useCallback(
+    (ep: AlertEpisode) => {
+      if (
+        activeTimeFilter &&
+        Math.abs(activeTimeFilter.stepValue - ep.stepValue) < 1e-6 &&
+        (
+          Math.abs(activeTimeFilter.startTs - ep.startTs) <= 30000 ||
+          (ep.startTs <= activeTimeFilter.endTs + 15000 && ep.endTs >= activeTimeFilter.startTs - 15000)
+        )
+      ) {
+        handleRestoreTimeRange();
+        return;
+      }
+
+      let searchFrom: string | number | undefined;
+      let searchTo: string | number | undefined;
+      try {
+        const search = locationService.getSearchObject();
+        if (search?.from !== null && search?.from !== undefined) {
+          searchFrom = search.from as string | number;
+        }
+        if (search?.to !== null && search?.to !== undefined) {
+          searchTo = search.to as string | number;
+        }
+      } catch {
+        // fallback
+      }
+
+      const backup: TimeRangeBackup = activeTimeFilter
+        ? {
+            ...activeTimeFilter,
+            startTs: ep.startTs,
+            endTs: ep.endTs,
+            stepValue: ep.stepValue,
+            wasActiveWhenFiltered: Boolean(ep.isActiveNow),
+          }
+        : {
+            from: searchFrom ?? tStart,
+            to: searchTo ?? tEnd,
+            startTs: ep.startTs,
+            endTs: ep.endTs,
+            stepValue: ep.stepValue,
+            wasActiveWhenFiltered: Boolean(ep.isActiveNow),
+          };
+
+      try {
+        sessionStorage.setItem(ALERT_TIME_FILTER_STORAGE_KEY, JSON.stringify(backup));
+      } catch {
+        // ignore
+      }
+      setActiveTimeFilter(backup);
+
+      const duration = Math.max(ep.endTs - ep.startTs, 60000);
+      const padding = Math.max(Math.round(duration * 0.05), 30000);
+      const from = Math.max(0, ep.startTs - padding);
+      const to = ep.isActiveNow ? Date.now() : ep.endTs + padding;
+
+      if (onChangeTimeRange) {
+        try {
+          onChangeTimeRange({ from, to });
+        } catch (err) {
+          console.warn('Falha em onChangeTimeRange:', err);
+        }
+      }
+      try {
+        locationService.partial({ from, to });
+      } catch (err) {
+        console.warn('Falha em locationService.partial:', err);
+      }
+    },
+    [activeTimeFilter, handleRestoreTimeRange, onChangeTimeRange, tStart, tEnd]
+  );
+
+  // Classificação estrita do perfil da métrica (ISA-101 / Pop-up de Alertas)
+  const profile: MetricProfile = useMemo(
+    () => getMetricProfile(field, comparisonMode, field?.display),
+    [field, comparisonMode]
+  );
 
   const formatValue = useCallback((v: number) => formatFieldValue(v, field, theme).text, [field, theme]);
   const liveThresholds = getFieldThresholds(field, theme, fieldConfig);
 
   const resolvedEpisodes = useMemo(() => {
-    return badge.episodes.map((ep) => {
+    const isRealtime = Math.abs(Date.now() - tEnd) < 120000;
+    const isFilteredHistorical = Boolean(activeTimeFilter && !activeTimeFilter.wasActiveWhenFiltered);
+    const forceHistorical = !isRealtime || isFilteredHistorical;
+
+    const raw = badge.episodes.map((ep) => {
       const numStepVal = Number(ep.stepValue);
       const matchingStep = liveThresholds?.steps.find(
         (s) => s.value !== null && s.value !== undefined && Math.abs(Number(s.value) - numStepVal) < 1e-6
       );
       const color = resolveAlertHexColor(matchingStep?.color || ep.color || badge.color);
-      return { ...ep, color };
+      const isActiveNow = forceHistorical ? false : Boolean(ep.isActiveNow);
+      return { ...ep, color, isActiveNow };
     });
-  }, [badge.episodes, badge.color, liveThresholds]);
+    return deduplicateEpisodesByCriticality(raw, comparisonMode, liveThresholds);
+  }, [badge.episodes, badge.color, liveThresholds, comparisonMode, tEnd, activeTimeFilter]);
 
   const totalMs = useMemo(() => {
     if (resolvedEpisodes.length === 0) { return 0; }
@@ -1626,9 +2404,6 @@ const AlertLeftDrawer: React.FC<{
 
   const spansDays = new Date(tStart).toDateString() !== new Date(tEnd).toDateString();
   const activeEpisode = resolvedEpisodes.find((ep) => ep.isActiveNow);
-  const peakEpisode = resolvedEpisodes.length > 0
-    ? resolvedEpisodes.reduce((prev, curr) => (curr.maxValue > prev.maxValue ? curr : prev), resolvedEpisodes[0])
-    : undefined;
   const headerColor = badge.state === 'active'
     ? resolveAlertHexColor(activeEpisode?.color || badge.color)
     : '#EAB839';
@@ -1638,12 +2413,14 @@ const AlertLeftDrawer: React.FC<{
       getAlertContextSummary(resolvedEpisodes, {
         totalMs,
         windowMs: Math.max(0, tEnd - tStart),
+        monitoredMs: badge.monitoredDurationMs,
+        profile,
         spansDays,
         exactMatch,
         comparisonMode,
         formatValue,
       }),
-    [resolvedEpisodes, totalMs, tStart, tEnd, spansDays, exactMatch, comparisonMode, formatValue]
+    [resolvedEpisodes, totalMs, tStart, tEnd, badge.monitoredDurationMs, profile, spansDays, exactMatch, comparisonMode, formatValue]
   );
 
   // Níveis únicos de threshold para as pílulas de filtro rápido
@@ -1671,11 +2448,40 @@ const AlertLeftDrawer: React.FC<{
     return resolvedEpisodes.filter((ep) => Math.abs(ep.stepValue - activeFilter) < 1e-6);
   }, [resolvedEpisodes, activeFilter]);
 
-  const statCell = (label: string, value: string, extra: React.CSSProperties = {}, valueStyle: React.CSSProperties = {}) => (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, ...extra }}>
-      <span style={{ fontSize: 9, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</span>
-      <span style={{ fontWeight: 600, fontSize: 11, ...valueStyle }}>{value}</span>
+  const statCell = (
+    label: string,
+    value: string,
+    extra: React.CSSProperties = {},
+    valueStyle: React.CSSProperties = {},
+    subtext?: string,
+    title?: string
+  ) => (
+    <div
+      style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', minWidth: 0, gap: 1, ...extra }}
+      title={title}
+    >
+      <span style={{ fontSize: 9, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: 'center', width: '100%', lineHeight: 1.2 }}>{label}</span>
+      <span style={{ fontWeight: 600, fontSize: 11, textAlign: 'center', width: '100%', ...valueStyle }}>{value}</span>
+      {subtext && (
+        <span style={{ fontSize: 8.5, opacity: 0.55, whiteSpace: 'nowrap', lineHeight: 1, textAlign: 'center', width: '100%' }}>{subtext}</span>
+      )}
     </div>
+  );
+
+  const thirdStat = resolveThirdSummaryCell(
+    profile,
+    resolvedEpisodes,
+    totalMs,
+    tStart,
+    tEnd,
+    field,
+    comparisonMode,
+    formatValue,
+    badge.state,
+    badge.color,
+    headerColor,
+    badge.monitoredDurationMs,
+    badge.healthyDurationMs
   );
 
   const iconBtnStyle: React.CSSProperties = {
@@ -1730,6 +2536,7 @@ const AlertLeftDrawer: React.FC<{
     <div
       data-alert-left-drawer="true"
       data-alert-popup="true"
+      data-metric-profile={profile}
       onClick={(e) => e.stopPropagation()}
       style={{
         position: 'fixed',
@@ -1887,10 +2694,12 @@ const AlertLeftDrawer: React.FC<{
               { fontWeight: 700, color: headerColor }
             )}
             {statCell(
-              'Pico Máximo',
-              peakEpisode ? formatValue(peakEpisode.maxValue) : '—',
+              thirdStat.label,
+              thirdStat.value,
               {},
-              { fontWeight: 700, color: peakEpisode?.color || headerColor }
+              { fontWeight: 700, color: thirdStat.color },
+              thirdStat.subtext,
+              thirdStat.title
             )}
           </div>
         </div>
@@ -1959,27 +2768,108 @@ const AlertLeftDrawer: React.FC<{
             Nenhum caso corresponde ao filtro selecionado.
           </div>
         ) : (
-          filteredEpisodes.map((ep, idx) => (
-            <div
-              key={`${ep.stepValue}-${ep.startTs}-${idx}`}
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 6,
-                padding: '9px 11px',
-                borderRadius: 6,
-                background: ep.isActiveNow ? parseColorToRgba(ep.color, 0.08) : 'rgba(255,255,255,0.025)',
-                border: `1px solid ${ep.isActiveNow ? parseColorToRgba(ep.color, 0.32) : 'rgba(255,255,255,0.06)'}`,
-                borderLeft: `3px solid ${ep.color}`,
-                flexShrink: 0,
-              }}
-            >
-              {/* Cabeçalho do Card */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
-                <span style={{ fontWeight: 700, fontSize: 11, color: ep.color }}>
-                  Threshold {exactMatch ? '=' : '≥'} {formatValue(ep.stepValue)}
-                </span>
-                {ep.isActiveNow ? (
+          filteredEpisodes.map((ep, idx) => {
+            const isThisEpFiltered = Boolean(
+              activeTimeFilter &&
+              Math.abs(activeTimeFilter.stepValue - ep.stepValue) < 1e-6 &&
+              (
+                Math.abs(activeTimeFilter.startTs - ep.startTs) <= 30000 ||
+                (ep.startTs <= activeTimeFilter.endTs + 15000 && ep.endTs >= activeTimeFilter.startTs - 15000)
+              )
+            );
+
+            return (
+              <div
+                key={`${ep.stepValue}-${ep.startTs}-${idx}`}
+                role="button"
+                tabIndex={0}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (isThisEpFiltered) {
+                    handleRestoreTimeRange();
+                  } else {
+                    handleEpisodeClick(ep);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.stopPropagation();
+                    if (isThisEpFiltered) {
+                      handleRestoreTimeRange();
+                    } else {
+                      handleEpisodeClick(ep);
+                    }
+                  }
+                }}
+                title={
+                  isThisEpFiltered
+                    ? 'Período filtrado no dashboard — clique para voltar ao tempo anterior'
+                    : `Clique para filtrar o dashboard neste período (${formatTimeDisplay(ep.startTs, spansDays)} – ${ep.isActiveNow ? 'Agora' : formatTimeDisplay(ep.endTs, spansDays)})`
+                }
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                  padding: '9px 11px',
+                  borderRadius: 6,
+                  background: isThisEpFiltered
+                    ? parseColorToRgba(ep.color, 0.16)
+                    : ep.isActiveNow
+                    ? parseColorToRgba(ep.color, 0.08)
+                    : 'rgba(255,255,255,0.025)',
+                  border: isThisEpFiltered
+                    ? `1px solid ${parseColorToRgba(ep.color, 0.75)}`
+                    : `1px solid ${ep.isActiveNow ? parseColorToRgba(ep.color, 0.32) : 'rgba(255,255,255,0.06)'}`,
+                  borderLeft: `3px solid ${ep.color}`,
+                  boxShadow: isThisEpFiltered
+                    ? `0 0 10px ${parseColorToRgba(ep.color, 0.35)}, inset 0 0 0 1px ${parseColorToRgba(ep.color, 0.25)}`
+                    : 'none',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease',
+                  flexShrink: 0,
+                  transform: isThisEpFiltered ? 'translateY(-1px)' : 'none',
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = isThisEpFiltered
+                    ? parseColorToRgba(ep.color, 0.22)
+                    : ep.isActiveNow
+                    ? parseColorToRgba(ep.color, 0.14)
+                    : 'rgba(255,255,255,0.06)';
+                  const outline = isThisEpFiltered
+                    ? parseColorToRgba(ep.color, 0.9)
+                    : ep.isActiveNow
+                    ? parseColorToRgba(ep.color, 0.55)
+                    : 'rgba(255,255,255,0.25)';
+                  e.currentTarget.style.borderTopColor = outline;
+                  e.currentTarget.style.borderRightColor = outline;
+                  e.currentTarget.style.borderBottomColor = outline;
+                  e.currentTarget.style.borderLeftColor = ep.color;
+                  e.currentTarget.style.transform = 'translateY(-1px)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = isThisEpFiltered
+                    ? parseColorToRgba(ep.color, 0.16)
+                    : ep.isActiveNow
+                    ? parseColorToRgba(ep.color, 0.08)
+                    : 'rgba(255,255,255,0.025)';
+                  const outline = isThisEpFiltered
+                    ? parseColorToRgba(ep.color, 0.75)
+                    : ep.isActiveNow
+                    ? parseColorToRgba(ep.color, 0.32)
+                    : 'rgba(255,255,255,0.06)';
+                  e.currentTarget.style.borderTopColor = outline;
+                  e.currentTarget.style.borderRightColor = outline;
+                  e.currentTarget.style.borderBottomColor = outline;
+                  e.currentTarget.style.borderLeftColor = ep.color;
+                  e.currentTarget.style.transform = isThisEpFiltered ? 'translateY(-1px)' : 'none';
+                }}
+              >
+                {/* Cabeçalho do Card */}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+                  <span style={{ fontWeight: 700, fontSize: 11, color: ep.color }}>
+                    Threshold {exactMatch ? '=' : '≥'} {formatValue(ep.stepValue)}
+                  </span>
+                  {ep.isActiveNow ? (
                   <span
                     style={{
                       fontSize: 9,
@@ -2035,29 +2925,12 @@ const AlertLeftDrawer: React.FC<{
                 </div>
               </div>
 
-              {/* Base do Card: 3 colunas compactas (Pico, Média, Mínimo) */}
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: '1fr 1fr 1fr',
-                  gap: 4,
-                  marginTop: 2,
-                  padding: '4px 6px',
-                  borderRadius: 4,
-                  background: 'rgba(0,0,0,0.22)',
-                }}
-              >
-                {statCell('Pico', formatValue(ep.maxValue), {}, { fontWeight: 700, color: ep.color })}
-                {statCell(
-                  'Média',
-                  formatValue(ep.avgValue),
-                  { borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' }
-                )}
-                {statCell('Mínimo', formatValue(ep.minValue), {}, { opacity: 0.85 })}
-              </div>
+              {/* Base do Card: 3 colunas compactas adaptadas ao perfil da métrica */}
+              {renderEpisodeCardBottomGrid(ep, profile, tStart, tEnd, formatValue, statCell, field)}
             </div>
-          ))
-        )}
+          );
+        })
+      )}
       </div>
     </div>,
     document.body
@@ -2087,6 +2960,7 @@ const AlertPopupPortal: React.FC<{
   metricLabel?: string;
   currentValueText?: string;
   currentValueColor?: string;
+  onChangeTimeRange?: (range: { from: number; to: number }) => void;
 }> = ({
   badge,
   tStart,
@@ -2103,7 +2977,135 @@ const AlertPopupPortal: React.FC<{
   metricLabel,
   currentValueText,
   currentValueColor,
+  onChangeTimeRange,
 }) => {
+  // Classificação estrita do perfil da métrica (ISA-101 / Pop-up de Alertas)
+  const profile: MetricProfile = useMemo(
+    () => getMetricProfile(field, comparisonMode, field?.display),
+    [field, comparisonMode]
+  );
+
+  const [activeTimeFilter, setActiveTimeFilter] = useState<TimeRangeBackup | null>(() => {
+    try {
+      const raw = sessionStorage.getItem(ALERT_TIME_FILTER_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const handleRestoreTimeRange = useCallback(() => {
+    let backup = activeTimeFilter;
+    if (!backup) {
+      try {
+        const raw = sessionStorage.getItem(ALERT_TIME_FILTER_STORAGE_KEY);
+        if (raw) {
+          backup = JSON.parse(raw);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (backup) {
+      const { from, to } = backup;
+      if (onChangeTimeRange) {
+        try {
+          const numFrom = typeof from === 'number' ? from : Number(from) || tStart;
+          const numTo = typeof to === 'number' ? to : Number(to) || tEnd;
+          onChangeTimeRange({ from: numFrom, to: numTo });
+        } catch (err) {
+          console.warn('Falha em onChangeTimeRange ao restaurar:', err);
+        }
+      }
+      try {
+        locationService.partial({ from, to });
+      } catch (err) {
+        console.warn('Falha em locationService.partial ao restaurar:', err);
+      }
+    }
+
+    try {
+      sessionStorage.removeItem(ALERT_TIME_FILTER_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+    setActiveTimeFilter(null);
+  }, [activeTimeFilter, onChangeTimeRange, tStart, tEnd]);
+
+  const handleEpisodeClick = useCallback(
+    (ep: AlertEpisode) => {
+      if (
+        activeTimeFilter &&
+        Math.abs(activeTimeFilter.stepValue - ep.stepValue) < 1e-6 &&
+        (
+          Math.abs(activeTimeFilter.startTs - ep.startTs) <= 30000 ||
+          (ep.startTs <= activeTimeFilter.endTs + 15000 && ep.endTs >= activeTimeFilter.startTs - 15000)
+        )
+      ) {
+        handleRestoreTimeRange();
+        return;
+      }
+
+      let searchFrom: string | number | undefined;
+      let searchTo: string | number | undefined;
+      try {
+        const search = locationService.getSearchObject();
+        if (search?.from !== null && search?.from !== undefined) {
+          searchFrom = search.from as string | number;
+        }
+        if (search?.to !== null && search?.to !== undefined) {
+          searchTo = search.to as string | number;
+        }
+      } catch {
+        // fallback
+      }
+
+      const backup: TimeRangeBackup = activeTimeFilter
+        ? {
+            ...activeTimeFilter,
+            startTs: ep.startTs,
+            endTs: ep.endTs,
+            stepValue: ep.stepValue,
+            wasActiveWhenFiltered: Boolean(ep.isActiveNow),
+          }
+        : {
+            from: searchFrom ?? tStart,
+            to: searchTo ?? tEnd,
+            startTs: ep.startTs,
+            endTs: ep.endTs,
+            stepValue: ep.stepValue,
+            wasActiveWhenFiltered: Boolean(ep.isActiveNow),
+          };
+
+      try {
+        sessionStorage.setItem(ALERT_TIME_FILTER_STORAGE_KEY, JSON.stringify(backup));
+      } catch {
+        // ignore
+      }
+      setActiveTimeFilter(backup);
+
+      const duration = Math.max(ep.endTs - ep.startTs, 60000);
+      const padding = Math.max(Math.round(duration * 0.05), 30000);
+      const from = Math.max(0, ep.startTs - padding);
+      const to = ep.isActiveNow ? Date.now() : ep.endTs + padding;
+
+      if (onChangeTimeRange) {
+        try {
+          onChangeTimeRange({ from, to });
+        } catch (err) {
+          console.warn('Falha em onChangeTimeRange:', err);
+        }
+      }
+      try {
+        locationService.partial({ from, to });
+      } catch (err) {
+        console.warn('Falha em locationService.partial:', err);
+      }
+    },
+    [activeTimeFilter, handleRestoreTimeRange, onChangeTimeRange, tStart, tEnd]
+  );
+
   const popupRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ top: number; left: number; opacity: number; maxHeight: number }>({
     top: 0,
@@ -2293,45 +3295,79 @@ const AlertPopupPortal: React.FC<{
 
   // Lista plana unificada mantendo a ordenação estrita de getAlertEpisodes e cores hexadecimais válidas
   const resolvedEpisodes = useMemo(() => {
-    return badge.episodes.map((ep) => {
+    const isRealtime = Math.abs(Date.now() - tEnd) < 120000;
+    const isFilteredHistorical = Boolean(activeTimeFilter && !activeTimeFilter.wasActiveWhenFiltered);
+    const forceHistorical = !isRealtime || isFilteredHistorical;
+
+    const raw = badge.episodes.map((ep) => {
       const numStepVal = Number(ep.stepValue);
       const matchingStep = liveThresholds?.steps.find(
         (s) => s.value !== null && s.value !== undefined && Math.abs(Number(s.value) - numStepVal) < 1e-6
       );
       const color = resolveAlertHexColor(matchingStep?.color || ep.color || badge.color);
-      return { ...ep, color };
+      const isActiveNow = forceHistorical ? false : Boolean(ep.isActiveNow);
+      return { ...ep, color, isActiveNow };
     });
-  }, [badge.episodes, badge.color, liveThresholds]);
+    return deduplicateEpisodesByCriticality(raw, comparisonMode, liveThresholds);
+  }, [badge.episodes, badge.color, liveThresholds, comparisonMode, tEnd, activeTimeFilter]);
 
   const spansDays = new Date(tStart).toDateString() !== new Date(tEnd).toDateString();
 
-  const statCell = (label: string, value: string, extra: React.CSSProperties = {}, valueStyle: React.CSSProperties = {}) => (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, ...extra }}>
-      <span style={{ fontSize: 9, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</span>
-      <span style={{ fontWeight: 600, fontSize: 11, ...valueStyle }}>{value}</span>
+  const statCell = (
+    label: string,
+    value: string,
+    extra: React.CSSProperties = {},
+    valueStyle: React.CSSProperties = {},
+    subtext?: string,
+    title?: string
+  ) => (
+    <div
+      style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', minWidth: 0, gap: 1, ...extra }}
+      title={title}
+    >
+      <span style={{ fontSize: 9, opacity: 0.5, textTransform: 'uppercase', letterSpacing: '0.06em', textAlign: 'center', width: '100%', lineHeight: 1.2 }}>{label}</span>
+      <span style={{ fontWeight: 600, fontSize: 11, textAlign: 'center', width: '100%', ...valueStyle }}>{value}</span>
+      {subtext && (
+        <span style={{ fontSize: 8.5, opacity: 0.55, whiteSpace: 'nowrap', lineHeight: 1, textAlign: 'center', width: '100%' }}>{subtext}</span>
+      )}
     </div>
   );
 
   const activeEpisode = resolvedEpisodes.find((ep) => ep.isActiveNow);
-  const peakEpisode = resolvedEpisodes.length > 0
-    ? resolvedEpisodes.reduce((prev, curr) => (curr.maxValue > prev.maxValue ? curr : prev), resolvedEpisodes[0])
-    : undefined;
   const headerColor = badge.state === 'active'
     ? resolveAlertHexColor(activeEpisode?.color || badge.color)
     : '#EAB839';
   const containerGlowColor = headerColor;
+
+  const thirdStat = resolveThirdSummaryCell(
+    profile,
+    resolvedEpisodes,
+    totalMs,
+    tStart,
+    tEnd,
+    field,
+    comparisonMode,
+    formatValue,
+    badge.state,
+    badge.color,
+    headerColor,
+    badge.monitoredDurationMs,
+    badge.healthyDurationMs
+  );
 
   const narrativeSummary = useMemo(
     () =>
       getAlertContextSummary(resolvedEpisodes, {
         totalMs,
         windowMs: Math.max(0, tEnd - tStart),
+        monitoredMs: badge.monitoredDurationMs,
+        profile,
         spansDays,
         exactMatch,
         comparisonMode,
         formatValue,
       }),
-    [resolvedEpisodes, totalMs, tStart, tEnd, spansDays, exactMatch, comparisonMode, formatValue]
+    [resolvedEpisodes, totalMs, tStart, tEnd, badge.monitoredDurationMs, profile, spansDays, exactMatch, comparisonMode, formatValue]
   );
 
   const iconBtnStyle: React.CSSProperties = {
@@ -2355,6 +3391,7 @@ const AlertPopupPortal: React.FC<{
     <div
       ref={popupRef}
       data-alert-popup="true"
+      data-metric-profile={profile}
       onClick={(e) => e.stopPropagation()}
       style={{
         position: 'fixed',
@@ -2453,7 +3490,7 @@ const AlertPopupPortal: React.FC<{
             <span>{badge.state === 'active' ? 'Threshold excedido' : 'Excursões na janela'}</span>
             {currentValueText && (
               <span style={{ fontWeight: 600, color: currentValueColor || headerColor }}>
-                Atual: {currentValueText}
+                {badge.state === 'active' ? `Atual: ${currentValueText}` : `Último: ${currentValueText}`}
               </span>
             )}
           </div>
@@ -2518,35 +3555,119 @@ const AlertPopupPortal: React.FC<{
                 { fontWeight: 700, color: headerColor }
               )}
               {statCell(
-                'Pico Máximo',
-                peakEpisode ? formatValue(peakEpisode.maxValue) : '—',
+                thirdStat.label,
+                thirdStat.value,
                 {},
-                { fontWeight: 700, color: peakEpisode?.color || headerColor }
+                { fontWeight: 700, color: thirdStat.color },
+                thirdStat.subtext,
+                thirdStat.title
               )}
             </div>
           </div>
         )}
 
-        {resolvedEpisodes.map((ep, idx) => (
-          <div
-            key={`${ep.stepValue}-${ep.startTs}-${idx}`}
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 6,
-              padding: '8px 10px',
-              borderRadius: 6,
-              background: ep.isActiveNow ? parseColorToRgba(ep.color, 0.08) : 'rgba(255,255,255,0.025)',
-              border: `1px solid ${ep.isActiveNow ? parseColorToRgba(ep.color, 0.32) : 'rgba(255,255,255,0.06)'}`,
-              borderLeft: `3px solid ${ep.color}`,
-            }}
-          >
-            {/* Cabeçalho do Card */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
-              <span style={{ fontWeight: 700, fontSize: 11, color: ep.color }}>
-                Threshold {exactMatch ? '=' : '≥'} {formatValue(ep.stepValue)}
-              </span>
-              {ep.isActiveNow ? (
+        {resolvedEpisodes.map((ep, idx) => {
+          const isThisEpFiltered = Boolean(
+            activeTimeFilter &&
+            Math.abs(activeTimeFilter.stepValue - ep.stepValue) < 1e-6 &&
+            (
+              Math.abs(activeTimeFilter.startTs - ep.startTs) <= 30000 ||
+              (ep.startTs <= activeTimeFilter.endTs + 15000 && ep.endTs >= activeTimeFilter.startTs - 15000)
+            )
+          );
+
+          return (
+            <div
+              key={`${ep.stepValue}-${ep.startTs}-${idx}`}
+              role="button"
+              tabIndex={0}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (isThisEpFiltered) {
+                  handleRestoreTimeRange();
+                } else {
+                  handleEpisodeClick(ep);
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.stopPropagation();
+                  if (isThisEpFiltered) {
+                    handleRestoreTimeRange();
+                  } else {
+                    handleEpisodeClick(ep);
+                  }
+                }
+              }}
+              title={
+                isThisEpFiltered
+                  ? 'Período filtrado no dashboard — clique para voltar ao tempo anterior'
+                  : `Clique para filtrar o dashboard neste período (${formatTimeDisplay(ep.startTs, spansDays)} – ${ep.isActiveNow ? 'Agora' : formatTimeDisplay(ep.endTs, spansDays)})`
+              }
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 6,
+                padding: '8px 10px',
+                borderRadius: 6,
+                background: isThisEpFiltered
+                  ? parseColorToRgba(ep.color, 0.16)
+                  : ep.isActiveNow
+                  ? parseColorToRgba(ep.color, 0.08)
+                  : 'rgba(255,255,255,0.025)',
+                border: isThisEpFiltered
+                  ? `1px solid ${parseColorToRgba(ep.color, 0.75)}`
+                  : `1px solid ${ep.isActiveNow ? parseColorToRgba(ep.color, 0.32) : 'rgba(255,255,255,0.06)'}`,
+                borderLeft: `3px solid ${ep.color}`,
+                boxShadow: isThisEpFiltered
+                  ? `0 0 10px ${parseColorToRgba(ep.color, 0.35)}, inset 0 0 0 1px ${parseColorToRgba(ep.color, 0.25)}`
+                  : 'none',
+                cursor: 'pointer',
+                transition: 'all 0.15s ease',
+                flexShrink: 0,
+                transform: isThisEpFiltered ? 'translateY(-1px)' : 'none',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = isThisEpFiltered
+                  ? parseColorToRgba(ep.color, 0.22)
+                  : ep.isActiveNow
+                  ? parseColorToRgba(ep.color, 0.14)
+                  : 'rgba(255,255,255,0.06)';
+                const outline = isThisEpFiltered
+                  ? parseColorToRgba(ep.color, 0.9)
+                  : ep.isActiveNow
+                  ? parseColorToRgba(ep.color, 0.55)
+                  : 'rgba(255,255,255,0.25)';
+                e.currentTarget.style.borderTopColor = outline;
+                e.currentTarget.style.borderRightColor = outline;
+                e.currentTarget.style.borderBottomColor = outline;
+                e.currentTarget.style.borderLeftColor = ep.color;
+                e.currentTarget.style.transform = 'translateY(-1px)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = isThisEpFiltered
+                  ? parseColorToRgba(ep.color, 0.16)
+                  : ep.isActiveNow
+                  ? parseColorToRgba(ep.color, 0.08)
+                  : 'rgba(255,255,255,0.025)';
+                const outline = isThisEpFiltered
+                  ? parseColorToRgba(ep.color, 0.75)
+                  : ep.isActiveNow
+                  ? parseColorToRgba(ep.color, 0.32)
+                  : 'rgba(255,255,255,0.06)';
+                e.currentTarget.style.borderTopColor = outline;
+                e.currentTarget.style.borderRightColor = outline;
+                e.currentTarget.style.borderBottomColor = outline;
+                e.currentTarget.style.borderLeftColor = ep.color;
+                e.currentTarget.style.transform = isThisEpFiltered ? 'translateY(-1px)' : 'none';
+              }}
+            >
+              {/* Cabeçalho do Card */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+                <span style={{ fontWeight: 700, fontSize: 11, color: ep.color }}>
+                  Threshold {exactMatch ? '=' : '≥'} {formatValue(ep.stepValue)}
+                </span>
+                {ep.isActiveNow ? (
                 <span
                   style={{
                     fontSize: 9,
@@ -2602,32 +3723,15 @@ const AlertPopupPortal: React.FC<{
               </div>
             </div>
 
-            {/* Base do Card: 3 colunas compactas (Pico, Média, Mínimo) */}
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr 1fr 1fr',
-                gap: 4,
-                marginTop: 2,
-                padding: '4px 6px',
-                borderRadius: 4,
-                background: 'rgba(0,0,0,0.22)',
-              }}
-            >
-              {statCell('Pico', formatValue(ep.maxValue), {}, { fontWeight: 700, color: ep.color })}
-              {statCell(
-                'Média',
-                formatValue(ep.avgValue),
-                { borderLeft: '1px solid rgba(255,255,255,0.07)', borderRight: '1px solid rgba(255,255,255,0.07)' }
-              )}
-              {statCell('Mínimo', formatValue(ep.minValue), {}, { opacity: 0.85 })}
-            </div>
+            {/* Base do Card: 3 colunas compactas adaptadas ao perfil da métrica */}
+            {renderEpisodeCardBottomGrid(ep, profile, tStart, tEnd, formatValue, statCell, field)}
           </div>
-        ))}
-      </div>
-    </div>,
-    document.body
-  );
+        );
+      })}
+    </div>
+  </div>,
+  document.body
+);
 };
 
 export const AlertBadgePopover: React.FC<{
@@ -2644,6 +3748,7 @@ export const AlertBadgePopover: React.FC<{
   currentValueColor?: string;
   size?: number;
   allowNormal?: boolean;
+  onChangeTimeRange?: (range: { from: number; to: number }) => void;
 }> = ({
   badge,
   tStart,
@@ -2657,6 +3762,7 @@ export const AlertBadgePopover: React.FC<{
   currentValueColor,
   size = 18,
   allowNormal = false,
+  onChangeTimeRange,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
   const [isPinned, setIsPinned] = useState(false);
@@ -2748,6 +3854,7 @@ export const AlertBadgePopover: React.FC<{
     metricLabel: resolvedLabel,
     currentValueText: resolvedValueText,
     currentValueColor: currentValueColor || badgeColor,
+    onChangeTimeRange,
   };
 
   const isOpen = (isHovered || isPinned) && !isDrawerOpen;
@@ -2860,6 +3967,7 @@ export const AlertBadgePopover: React.FC<{
           metricLabel={resolvedLabel}
           currentValueText={resolvedValueText}
           currentValueColor={currentValueColor || badgeColor}
+          onChangeTimeRange={onChangeTimeRange}
         />
       )}
 
@@ -3430,6 +4538,7 @@ export const SimplePanel: React.FC<Props> = ({
                     metricLabel={singleLabel}
                     currentValueText={displayValue ?? '—'}
                     currentValueColor={valueColor}
+                    onChangeTimeRange={onChangeTimeRange}
                   />
                 )}
               </div>
@@ -3646,6 +4755,7 @@ export const SimplePanel: React.FC<Props> = ({
                        metricLabel={serieLabel}
                        currentValueText={formattedVal}
                        currentValueColor={multiValueColor}
+                       onChangeTimeRange={onChangeTimeRange}
                     />
                   </div>
                 )}
